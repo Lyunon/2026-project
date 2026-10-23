@@ -1,0 +1,2665 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>수면 모니터링 대시보드</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+  import { getDatabase, ref, query, limitToLast, onValue, update } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyB9NL0E9WohYB-Z-71IPk1ceXdQC3WI-Oc",
+    authDomain: "sleep-monitoring-f630c.firebaseapp.com",
+    databaseURL: "https://sleep-monitoring-f630c-default-rtdb.firebaseio.com",
+    projectId: "sleep-monitoring-f630c",
+    storageBucket: "sleep-monitoring-f630c.firebasestorage.app",
+    messagingSenderId: "973448794977",
+    appId: "1:973448794977:web:444ffdf1c65f1ab144eb20"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+  window._firebaseDb     = db;
+  window._firebaseRef    = ref;
+  window._firebaseUpdate = update;
+
+  // URL에서 deviceId 읽기
+  const params   = new URLSearchParams(window.location.search);
+  const deviceId = params.get('id');
+  window._deviceId = deviceId;
+
+  if (!deviceId) {
+    // deviceId 없으면 입력 화면으로 전환
+    window.dispatchEvent(new CustomEvent('nodeviceid'));
+  } else {
+    const userRef = `users/${deviceId}`;
+
+    /* 1. 오늘 요약: sleep_latest */
+    onValue(ref(db, `${userRef}/sleep_latest`), (snapshot) => {
+      const val = snapshot.val();
+      if (!val) {
+        window.dispatchEvent(new CustomEvent('sleepdata:empty'));
+        return;
+      }
+      window.dispatchEvent(new CustomEvent('sleepdata:update', { detail: val }));
+    });
+
+    /* 2. 주간 추이 + 전체 기록 */
+    onValue(ref(db, `${userRef}/sleep_summary`), (snapshot) => {
+      const val = snapshot.val() || {};
+
+      const allDays = Object.entries(val)
+        .map(([dateKey, data]) => ({ dateKey, ...data }))
+        .sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+      window.dispatchEvent(new CustomEvent('sleepall:update', { detail: allDays }));
+
+      const nowKST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Seoul' }));
+      const day = nowKST.getDay();
+      const diffToMonday = (day === 0 ? -6 : 1 - day);
+      const monday = new Date(nowKST);
+      monday.setDate(nowKST.getDate() + diffToMonday);
+      monday.setHours(0, 0, 0, 0);
+      const sunday = new Date(monday);
+      sunday.setDate(monday.getDate() + 6);
+      sunday.setHours(23, 59, 59, 999);
+
+      const toDateKey = (date) => {
+        const y = date.getFullYear();
+        const m = String(date.getMonth() + 1).padStart(2, '0');
+        const d = String(date.getDate()).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+      };
+
+      const mondayKey = toDateKey(monday);
+      const sundayKey = toDateKey(sunday);
+
+      const days = Object.entries(val)
+        .map(([dateKey, data]) => ({ dateKey, ...data }))
+        .filter(d => d.dateKey >= mondayKey && d.dateKey <= sundayKey)
+        .sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+
+      window.dispatchEvent(new CustomEvent('sleepsummary:update', { detail: days }));
+    });
+
+    /* 3. 이상 감지 기록 */
+    const alertsQuery = query(ref(db, `${userRef}/sleep_alerts`), limitToLast(10));
+    onValue(alertsQuery, (snapshot) => {
+      const val = snapshot.val() || {};
+      const list = Object.entries(val)
+        .map(([alertKey, data]) => ({ alertKey, ...data }))
+        .sort((a, b) => (a.time < b.time ? 1 : -1));
+      window.dispatchEvent(new CustomEvent('sleepalerts:update', { detail: list }));
+    });
+
+    /* 4. 센서: 조도 */
+    onValue(ref(db, "sensor_logs/light"), (snapshot) => {
+      const val = snapshot.val();
+      if (!val) return;
+      window.dispatchEvent(new CustomEvent('sensorlight:update', { detail: val }));
+    });
+
+    /* 5. 센서: PIR */
+    onValue(ref(db, "sensor_logs/pir"), (snapshot) => {
+      const val = snapshot.val();
+      if (!val) return;
+      window.dispatchEvent(new CustomEvent('sensorpir:update', { detail: val }));
+    });
+
+    /* 6. 센서: LiDAR */
+    onValue(ref(db, "sensor_logs/lidar"), (snapshot) => {
+      const val = snapshot.val();
+      if (!val) return;
+      window.dispatchEvent(new CustomEvent('sensorlidar:update', { detail: val }));
+    });
+
+    /* 7. 낮잠 요약 */
+    onValue(ref(db, `${userRef}/nap_summary`), (snapshot) => {
+      const val = snapshot.val() || {};
+      const napMap = {};
+      Object.entries(val).forEach(([dateKey, data]) => { napMap[dateKey] = data; });
+      window.dispatchEvent(new CustomEvent('napsummary:update', { detail: napMap }));
+    });
+  }
+</script>
+<style>
+  :root {
+    --bg: #f0f1f5;
+    --card-bg: #ffffff;
+    --surface: #e8eaf0;
+    --text-primary: #1a1a2e;
+    --text-secondary: #64648a;
+    --text-tertiary: #9898b0;
+    --border: rgba(0,0,0,0.07);
+    --green: #0a7c5c;
+    --green-bg: #d6f5eb;
+    --red: #b32020;
+    --red-bg: #fde8e8;
+    --amber: #8a5200;
+    --amber-bg: #fef3d6;
+    --purple: #4c3fb5;
+    --purple-bg: #eceafe;
+    --blue: #1554b0;
+    --blue-bg: #deeafb;
+    --yellow: #7a6000;
+    --yellow-bg: #fdf8dc;
+    --orange: #8a3a00;
+    --orange-bg: #fdebd8;
+    --accent: #5046e5;
+    --accent-light: #eeecff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12121e;
+      --card-bg: #1e1e30;
+      --surface: #252538;
+      --text-primary: #eeeef8;
+      --text-secondary: #9898c0;
+      --text-tertiary: #66667a;
+      --border: rgba(255,255,255,0.08);
+      --green: #3dcca0;
+      --green-bg: #063328;
+      --red: #f07070;
+      --red-bg: #3a1010;
+      --amber: #f0a800;
+      --amber-bg: #382200;
+      --purple: #a89ee8;
+      --purple-bg: #201a50;
+      --blue: #60a8f8;
+      --blue-bg: #0a2248;
+      --yellow: #e6c800;
+      --yellow-bg: #332e00;
+      --orange: #f09050;
+      --orange-bg: #3d1800;
+      --accent: #7c72ff;
+      --accent-light: #1e1a40;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+    background: var(--bg);
+    color: var(--text-primary);
+    padding: 0 0 80px;
+    min-height: 100vh;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 0 16px; }
+
+  /* 상단 헤더 */
+  .topbar {
+    background: var(--card-bg);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 50;
+  }
+  .topbar-inner { max-width: 720px; margin: 0 auto; width: 100%; display: flex; align-items: center; justify-content: space-between; }
+  .topbar .date { font-size: 12px; color: var(--text-tertiary); margin-bottom: 2px; letter-spacing: 0.3px; }
+  .topbar h1 { font-size: 18px; font-weight: 600; letter-spacing: -0.3px; }
+  .badge {
+    font-size: 11px;
+    background: var(--accent-light);
+    color: var(--accent);
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  /* 탭 */
+  .tabs {
+    display: flex;
+    gap: 0;
+    margin: 20px 0 20px;
+    background: var(--card-bg);
+    border-radius: 14px;
+    padding: 4px;
+    border: 1px solid var(--border);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab-btn {
+    appearance: none;
+    border: none;
+    background: none;
+    font-family: inherit;
+    font-size: 13px;
+    color: var(--text-secondary);
+    padding: 7px 12px;
+    cursor: pointer;
+    border-radius: 10px;
+    white-space: nowrap;
+    transition: background 0.15s, color 0.15s;
+    font-weight: 400;
+  }
+  .tab-btn:hover { background: var(--surface); color: var(--text-primary); }
+  .tab-btn.active {
+    background: var(--accent);
+    color: #fff;
+    font-weight: 500;
+  }
+
+  /* 카드 그리드 */
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .metric {
+    background: var(--card-bg);
+    border-radius: 16px;
+    padding: 16px;
+    border: 1px solid var(--border);
+  }
+  .metric .label {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-bottom: 6px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+  .metric .value {
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.5px;
+  }
+  .metric .value.ok { color: var(--green); }
+  .metric .value.warn { color: var(--amber); }
+  .metric .value.bad { color: var(--red); }
+
+  /* 섹션 타이틀 */
+  .section-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin: 24px 0 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  /* 범례 */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    margin-bottom: 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .legend span { display: flex; align-items: center; gap: 5px; }
+  .dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+
+  /* 차트 */
+  .chart-box { position: relative; width: 100%; height: 220px; margin-bottom: 8px; }
+  .chart-box.small { height: 200px; }
+
+  /* 수면 단계 바 */
+  .stage-list { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
+  .stage-row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .stage-row .swatch { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+  .stage-row .name { width: 70px; color: var(--text-secondary); }
+  .stage-row .pct { font-weight: 600; width: 38px; text-align: right; font-size: 13px; }
+  .stage-row .bar-bg { flex: 1; background: var(--surface); border-radius: 6px; height: 6px; overflow: hidden; }
+  .stage-row .bar-fill { display: block; height: 6px; border-radius: 6px; }
+
+  /* 카드 */
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 16px 18px;
+    margin-bottom: 14px;
+  }
+
+  /* 이상 감지 목록 */
+  .alert-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .alert-row:last-child { border-bottom: none; }
+  .alert-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; }
+  .alert-row .alert-title { font-weight: 600; margin-bottom: 2px; font-size: 14px; }
+  .alert-row .alert-desc { color: var(--text-secondary); }
+  .alert-row .alert-time { color: var(--text-tertiary); font-size: 11px; white-space: nowrap; margin-left: auto; }
+
+  /* 히스토리 테이블 */
+  .history-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .history-table th, .history-table td {
+    text-align: left;
+    padding: 10px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .history-table th {
+    color: var(--text-tertiary);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+  .history-table tr:last-child td { border-bottom: none; }
+
+  /* 필 배지 */
+  .pill {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 3px 9px;
+    border-radius: 20px;
+    white-space: nowrap;
+  }
+  .pill.ok     { background: var(--green-bg);  color: var(--green); }
+  .pill.warn   { background: var(--amber-bg);  color: var(--amber); }
+  .pill.bad    { background: var(--red-bg);    color: var(--red); }
+  .pill.blue   { background: var(--blue-bg);   color: var(--blue); }
+  .pill.yellow { background: var(--yellow-bg); color: var(--yellow); }
+  .pill.orange { background: var(--orange-bg); color: var(--orange); }
+
+  /* 하단 출처 */
+  .source-note {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    text-align: center;
+    margin-top: 32px;
+    letter-spacing: 0.2px;
+  }
+
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* 툴팁 */
+  .tooltip-wrap { position: relative; display: inline-block; }
+  .tooltip-wrap .tooltip-box {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--text-primary);
+    color: var(--bg);
+    font-size: 12px;
+    padding: 7px 11px;
+    border-radius: 10px;
+    white-space: pre-line;
+    z-index: 100;
+    pointer-events: none;
+    line-height: 1.6;
+    max-width: 240px;
+    word-break: keep-all;
+  }
+  .tooltip-wrap .tooltip-box::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: var(--text-primary);
+  }
+  .tooltip-wrap:hover .tooltip-box,
+  .tooltip-wrap.active .tooltip-box { display: block; }
+
+  /* ===== 삼성헬스 스타일 카드 ===== */
+
+  /* 히어로 카드 (수면 점수) */
+  .sh-hero-card {
+    background: linear-gradient(135deg, #4c3fb5 0%, #6c5ce7 50%, #a29bfe 100%);
+    border-radius: 24px;
+    padding: 22px 22px 18px;
+    margin-bottom: 14px;
+    color: #fff;
+    position: relative;
+    overflow: hidden;
+  }
+  .sh-hero-card::before {
+    content: '';
+    position: absolute;
+    top: -40px; right: -40px;
+    width: 160px; height: 160px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.06);
+  }
+  .sh-hero-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+  .sh-hero-label {
+    font-size: 13px;
+    font-weight: 600;
+    opacity: 0.85;
+    letter-spacing: 0.3px;
+  }
+  .sh-hero-badge {
+    font-size: 11px;
+    font-weight: 600;
+    background: rgba(255,255,255,0.2);
+    padding: 3px 10px;
+    border-radius: 20px;
+    letter-spacing: 0.2px;
+  }
+  .sh-hero-body {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    margin-bottom: 14px;
+  }
+  .sh-ring-wrap {
+    position: relative;
+    width: 130px;
+    height: 130px;
+    flex-shrink: 0;
+  }
+  .sh-ring-inner {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  .sh-score-num {
+    font-size: 34px;
+    font-weight: 700;
+    letter-spacing: -1px;
+    line-height: 1;
+  }
+  .sh-score-label {
+    font-size: 13px;
+    opacity: 0.75;
+    margin-top: 2px;
+  }
+  .sh-hero-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    flex: 1;
+  }
+  .sh-stat {}
+  .sh-stat-label {
+    font-size: 11px;
+    opacity: 0.7;
+    margin-bottom: 3px;
+    font-weight: 500;
+  }
+  .sh-stat-val {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -0.3px;
+  }
+  .sh-hero-grade {
+    font-size: 13px;
+    font-weight: 600;
+    opacity: 0.9;
+    text-align: center;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255,255,255,0.2);
+  }
+
+  /* 생체 데이터 카드 */
+  .sh-bio-card {
+    background: var(--card-bg);
+    border-radius: 20px;
+    padding: 18px 16px;
+    border: 1px solid var(--border);
+  }
+  .sh-bio-icon {
+    width: 38px; height: 38px;
+    border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 12px;
+  }
+  .sh-bio-label {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-bottom: 4px;
+    font-weight: 500;
+  }
+  .sh-bio-val {
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    color: var(--text-primary);
+    line-height: 1;
+  }
+  .sh-bio-unit {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-top: 3px;
+  }
+
+  /* 이상 감지 카드 */
+  .sh-alert-card {
+    background: var(--card-bg);
+    border-radius: 20px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+    margin-bottom: 14px;
+  }
+  .sh-alert-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--green);
+  }
+  .sh-alert-dot.warn { background: var(--amber); }
+  .sh-alert-dot.bad  { background: var(--red); }
+  .sh-alert-title { font-size: 14px; font-weight: 600; color: var(--text-primary); margin-bottom: 2px; }
+  .sh-alert-sub { font-size: 12px; color: var(--text-tertiary); }
+
+  /* ===== 작은 요약 카드 그리드 ===== */
+  .mini-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .mini-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 16px;
+    cursor: pointer;
+    transition: transform 0.12s, box-shadow 0.12s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .mini-card:active { transform: scale(0.97); }
+  .mini-card.full { grid-column: 1 / -1; }
+  .mini-card-icon {
+    width: 36px; height: 36px;
+    border-radius: 11px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px;
+    margin-bottom: 10px;
+  }
+  .mini-card-label {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-weight: 500;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+  .mini-card-val {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.4px;
+    color: var(--text-primary);
+    line-height: 1.1;
+  }
+  .mini-card-sub {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 3px;
+  }
+  .mini-card-arrow {
+    float: right;
+    font-size: 14px;
+    color: var(--text-tertiary);
+    margin-top: -28px;
+  }
+
+  /* ===== 드래그 핸들 및 편집 모드 ===== */
+  .drag-handle {
+    display: none;
+    position: absolute;
+    top: 10px; right: 10px;
+    font-size: 16px;
+    color: var(--text-tertiary);
+    cursor: grab;
+    line-height: 1;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .mini-card { position: relative; }
+
+  .mini-grid.edit-mode .drag-handle { display: block; }
+  .mini-grid.edit-mode .mini-card {
+    cursor: grab;
+    animation: wobble 0.3s ease;
+  }
+  .mini-grid.edit-mode .mini-card:active { cursor: grabbing; }
+
+  @keyframes wobble {
+    0%   { transform: rotate(0deg); }
+    25%  { transform: rotate(-1deg); }
+    75%  { transform: rotate(1deg); }
+    100% { transform: rotate(0deg); }
+  }
+
+  .mini-card.drag-over {
+    border: 2px dashed var(--accent) !important;
+    background: var(--accent-light) !important;
+  }
+  .mini-card.dragging {
+    opacity: 0.4;
+    transform: scale(0.96);
+  }
+
+  /* ===== 바텀 시트 ===== */
+  .sheet-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.45);
+    z-index: 100;
+    opacity: 0;
+    transition: opacity 0.25s;
+  }
+  .sheet-overlay.visible { opacity: 1; }
+
+  .sheet {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    background: var(--card-bg);
+    border-radius: 24px 24px 0 0;
+    z-index: 101;
+    transform: translateY(100%);
+    transition: transform 0.35s cubic-bezier(0.32, 0.72, 0, 1);
+    max-height: 88vh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .sheet.visible { transform: translateY(0); }
+
+  .sheet-handle {
+    width: 36px; height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    margin: 12px auto 0;
+  }
+  .sheet-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px 12px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--card-bg);
+    z-index: 1;
+  }
+  .sheet-title {
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+  }
+  .sheet-close {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    background: var(--surface);
+    border: none;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px;
+    color: var(--text-secondary);
+  }
+  .sheet-body { padding: 18px 20px 40px; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="topbar-inner">
+    <div>
+      <p class="date" id="todayLabel">오늘</p>
+      <h1>수면 모니터링</h1>
+    </div>
+    <span class="badge" id="dataBadge">연결 중...</span>
+  </div>
+</div>
+<div class="wrap" style="padding-top: 20px;">
+
+  <div class="tabs" style="display:none;"></div>
+
+  <!-- 수면 점수 히어로 카드 -->
+  <div class="sh-hero-card" style="margin-bottom:12px;">
+    <div class="sh-hero-top">
+      <span class="sh-hero-label">수면 점수</span>
+      <span class="sh-hero-badge" id="m-anomaly-badge"></span>
+    </div>
+    <div class="sh-hero-body">
+      <div class="sh-ring-wrap">
+        <svg width="130" height="130" viewBox="0 0 130 130">
+          <circle cx="65" cy="65" r="54" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="10"/>
+          <circle id="scoreRing" cx="65" cy="65" r="54" fill="none" stroke="#fff" stroke-width="10"
+            stroke-linecap="round" stroke-dasharray="339.3" stroke-dashoffset="339.3"
+            transform="rotate(-90 65 65)" style="transition:stroke-dashoffset 1s ease;"/>
+        </svg>
+        <div class="sh-ring-inner">
+          <p class="sh-score-num" id="m-score-num">-</p>
+          <p class="sh-score-label">점</p>
+        </div>
+      </div>
+      <div class="sh-hero-stats">
+        <div class="sh-stat"><p class="sh-stat-label">수면 시간</p><p class="sh-stat-val" id="m-duration">-</p></div>
+        <div class="sh-stat"><p class="sh-stat-label">수면 효율</p><p class="sh-stat-val" id="m-efficiency">-</p></div>
+        <div class="sh-stat"><p class="sh-stat-label">취침</p><p class="sh-stat-val" id="m-start">-</p></div>
+        <div class="sh-stat"><p class="sh-stat-label">기상</p><p class="sh-stat-val" id="m-end">-</p></div>
+      </div>
+    </div>
+    <div class="sh-hero-grade" id="m-grade-label"></div>
+  </div>
+
+  <!-- 작은 카드 그리드 -->
+  <!-- 작은 카드 그리드 헤더 -->
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+    <p style="font-size:12px; color:var(--text-tertiary); margin:0;" id="editHint"></p>
+    <button id="editBtn" onclick="toggleEditMode()"
+      style="appearance:none; border:1px solid var(--border); background:var(--surface);
+             color:var(--text-secondary); border-radius:10px; padding:5px 14px;
+             font-size:12px; cursor:pointer; font-family:inherit;">
+      편집
+    </button>
+  </div>
+
+  <!-- 작은 카드 그리드 -->
+  <div class="mini-grid" id="miniGrid">
+
+    <div class="mini-card" data-card-id="hr" onclick="handleCardClick(event,'sheet-hr')">
+      <div class="drag-handle">⠿</div>
+      <div class="mini-card-icon" style="background:rgba(232,74,74,0.12);">❤️</div>
+      <p class="mini-card-label">평균 심박수</p>
+      <p class="mini-card-val" id="m-hr">-</p>
+      <p class="mini-card-sub">bpm</p>
+      <span class="mini-card-arrow">›</span>
+    </div>
+
+    <div class="mini-card" data-card-id="spo2" onclick="handleCardClick(event,'sheet-spo2')">
+      <div class="drag-handle">⠿</div>
+      <div class="mini-card-icon" style="background:rgba(74,144,232,0.12);">🩸</div>
+      <p class="mini-card-label">평균 SpO2</p>
+      <p class="mini-card-val" id="m-spo2">-</p>
+      <p class="mini-card-sub">%</p>
+      <span class="mini-card-arrow">›</span>
+    </div>
+
+    <div class="mini-card" data-card-id="stages" onclick="handleCardClick(event,'sheet-stages',function(){renderStages();})">
+      <div class="drag-handle">⠿</div>
+      <div class="mini-card-icon" style="background:#eeedfe;">💤</div>
+      <p class="mini-card-label">수면 단계</p>
+      <p class="mini-card-val" id="mini-stages-val">-</p>
+      <p class="mini-card-sub">깊은수면 · REM · 얕은수면</p>
+      <span class="mini-card-arrow">›</span>
+    </div>
+
+    <div class="mini-card" data-card-id="anomaly" onclick="handleCardClick(event,'sheet-anomaly')">
+      <div class="drag-handle">⠿</div>
+      <div class="mini-card-icon" style="background:#fde8e8;">⚠️</div>
+      <p class="mini-card-label">이상 감지</p>
+      <p class="mini-card-val" id="mini-anomaly-val">-</p>
+      <p class="mini-card-sub" id="m-anomaly">-</p>
+      <span class="mini-card-arrow">›</span>
+    </div>
+
+    <div class="mini-card full" data-card-id="trend" onclick="handleCardClick(event,'sheet-trend',function(){setTimeout(renderTrend,50);})">
+      <div class="drag-handle">⠿</div>
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <div class="mini-card-icon" style="background:#e0edfb; margin-bottom:0; width:32px; height:32px; font-size:15px;">📈</div>
+          <span style="font-size:14px; font-weight:600; color:var(--text-primary);">7일 추이</span>
+        </div>
+        <span style="color:var(--text-tertiary); font-size:18px;">›</span>
+      </div>
+      <div style="display:flex; gap:4px; align-items:flex-end; height:36px;" id="mini-trend-bars"></div>
+    </div>
+
+    <div class="mini-card" data-card-id="weekly" onclick="handleCardClick(event,'sheet-weekly')">
+      <div class="drag-handle">⠿</div>
+      <div class="mini-card-icon" style="background:#d6f5eb;">📊</div>
+      <p class="mini-card-label">주간 요약</p>
+      <p class="mini-card-val" id="mini-weekly-val">-</p>
+      <p class="mini-card-sub">이번 주 평균</p>
+      <span class="mini-card-arrow">›</span>
+    </div>
+
+    <div class="mini-card" data-card-id="sensor" onclick="handleCardClick(event,'sheet-sensor')">
+      <div class="drag-handle">⠿</div>
+      <div class="mini-card-icon" style="background:#faeeda;">🌡️</div>
+      <p class="mini-card-label">센서</p>
+      <p class="mini-card-val" id="mini-sensor-val">-</p>
+      <p class="mini-card-sub">조도 · PIR · LiDAR</p>
+      <span class="mini-card-arrow">›</span>
+    </div>
+
+    <div class="mini-card" data-card-id="weather" onclick="handleCardClick(event,'sheet-weather',function(){fetchWeather();})">
+      <div class="drag-handle">⠿</div>
+      <div class="mini-card-icon" style="background:#deeafb;">🌤️</div>
+      <p class="mini-card-label">날씨</p>
+      <p class="mini-card-val" id="mini-weather-val">-</p>
+      <p class="mini-card-sub" id="mini-weather-sub">현재 위치 기준</p>
+      <span class="mini-card-arrow">›</span>
+    </div>
+
+    <div class="mini-card full" data-card-id="alerts" onclick="handleCardClick(event,'sheet-alerts')">
+      <div class="drag-handle">⠿</div>
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <div class="mini-card-icon" style="background:#fde8e8; margin-bottom:0; width:32px; height:32px; font-size:15px;">🔔</div>
+          <div>
+            <p style="font-size:14px; font-weight:600; color:var(--text-primary); margin:0;">이상 감지 기록</p>
+            <p class="mini-card-sub" style="margin:2px 0 0;" id="mini-alerts-sub">최근 기록 없음</p>
+          </div>
+        </div>
+        <span style="color:var(--text-tertiary); font-size:18px;">›</span>
+      </div>
+    </div>
+
+  </div>
+  </div>
+
+  <p class="source-note" id="sourceNote">Firebase에서 실시간 데이터를 받아오는 중입니다.</p>
+</div>
+
+<!-- 오버레이 -->
+<div class="sheet-overlay" id="sheetOverlay" onclick="closeSheet()"></div>
+
+<!-- 바텀 시트: 심박수 -->
+<div class="sheet" id="sheet-hr">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><span class="sheet-title">심박수</span><button class="sheet-close" onclick="closeSheet()">✕</button></div>
+  <div class="sheet-body">
+    <div class="card-grid">
+      <div class="metric"><p class="label">평균</p><p class="value" id="d-hr-avg">-</p></div>
+      <div class="metric"><p class="label">최저</p><p class="value" id="d-hr-min">-</p></div>
+      <div class="metric"><p class="label">최고</p><p class="value" id="d-hr-max">-</p></div>
+    </div>
+    <p style="font-size:12px; color:var(--text-tertiary); margin-top:8px;">수면 중 측정된 심박수예요. 성인 정상 수면 심박수는 40~70 bpm이에요.</p>
+  </div>
+</div>
+
+<!-- 바텀 시트: SpO2 -->
+<div class="sheet" id="sheet-spo2">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><span class="sheet-title">산소포화도 (SpO2)</span><button class="sheet-close" onclick="closeSheet()">✕</button></div>
+  <div class="sheet-body">
+    <div class="card-grid">
+      <div class="metric"><p class="label">평균</p><p class="value" id="d-spo2-avg">-</p></div>
+      <div class="metric"><p class="label">최저</p><p class="value" id="d-spo2-min">-</p></div>
+    </div>
+    <p style="font-size:12px; color:var(--text-tertiary); margin-top:8px;">정상 SpO2는 95% 이상이에요. 90% 미만이면 의료 상담이 필요해요.</p>
+  </div>
+</div>
+
+<!-- 바텀 시트: 수면 단계 -->
+<div class="sheet" id="sheet-stages">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><span class="sheet-title">수면 단계</span><button class="sheet-close" onclick="closeSheet()">✕</button></div>
+  <div class="sheet-body">
+    <div class="card">
+      <div class="chart-box small"><canvas id="stageDonut"></canvas></div>
+      <div class="stage-list" id="stageList"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 바텀 시트: 이상 감지 -->
+<div class="sheet" id="sheet-anomaly">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><span class="sheet-title">이상 감지</span><button class="sheet-close" onclick="closeSheet()">✕</button></div>
+  <div class="sheet-body">
+    <div class="sh-alert-card">
+      <div style="display:flex; align-items:center; gap:10px;">
+        <div class="sh-alert-dot" id="m-anomaly-dot"></div>
+        <div>
+          <p class="sh-alert-title" id="m-anomaly-title">이상 감지 확인 중</p>
+        </div>
+      </div>
+    </div>
+    <p style="font-size:12px; color:var(--text-tertiary);">Z-score 기반으로 과거 데이터 대비 이상을 감지해요. 7일 이상 데이터가 쌓이면 정확도가 높아져요.</p>
+  </div>
+</div>
+
+<!-- 바텀 시트: 7일 추이 -->
+<div class="sheet" id="sheet-trend">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><span class="sheet-title">7일 추이</span><button class="sheet-close" onclick="closeSheet()">✕</button></div>
+  <div class="sheet-body">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+      <button id="prevWeekBtn" onclick="changeWeek(-1)" style="appearance:none; border:1px solid var(--border); background:var(--surface); color:var(--text-primary); border-radius:8px; padding:5px 12px; font-size:12px; cursor:pointer;">← 이전</button>
+      <span id="weekRangeLabel" style="font-size:12px; color:var(--text-secondary); font-weight:500;"></span>
+      <button id="nextWeekBtn" onclick="changeWeek(1)" style="appearance:none; border:1px solid var(--border); background:var(--surface); color:var(--text-primary); border-radius:8px; padding:5px 12px; font-size:12px; cursor:pointer;">다음 →</button>
+    </div>
+    <div class="legend">
+      <span><span class="dot" style="background:#1D9E75;"></span>수면 점수</span>
+      <span><span class="dot" style="background:#E8A838;"></span>수면 효율</span>
+      <span><span class="dot" style="background:#7F77DD;"></span>수면 시간</span>
+    </div>
+    <div class="chart-box" id="trendChartBox"><canvas id="trendChart"></canvas></div>
+    <p id="trendEmpty" style="display:none; font-size:13px; color:var(--text-secondary);">이번 주 수면 기록이 아직 없습니다.</p>
+    <div class="section-title">기록</div>
+    <div style="overflow-x:auto; -webkit-overflow-scrolling:touch;">
+      <table class="history-table" style="min-width:480px; font-size:12px;">
+        <thead><tr><th>날짜</th><th>취침</th><th>기상</th><th>수면 시간</th><th>점수</th><th>효율</th><th>상태</th></tr></thead>
+        <tbody id="historyBody"></tbody>
+      </table>
+    </div>
+    <div class="section-title">이번 주 평균</div>
+    <div class="card-grid" id="trendAvgGrid"></div>
+  </div>
+</div>
+
+<!-- 바텀 시트: 주간 요약 -->
+<div class="sheet" id="sheet-weekly">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><span class="sheet-title">주간 요약</span><button class="sheet-close" onclick="closeSheet()">✕</button></div>
+  <div class="sheet-body">
+    <p id="weeklyRange" style="font-size:12px; color:var(--text-tertiary); margin-bottom:14px;"></p>
+    <div class="card-grid" id="weeklyAvgGrid"></div>
+    <div class="section-title">Z-score 분석</div>
+    <div class="card" id="weeklyZCard"></div>
+    <div class="section-title">수면 단계 평균</div>
+    <div class="card"><div class="stage-list" id="weeklyStageList"></div></div>
+  </div>
+</div>
+
+<!-- 바텀 시트: 센서 -->
+<div class="sheet" id="sheet-sensor">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><span class="sheet-title">센서</span><button class="sheet-close" onclick="closeSheet()">✕</button></div>
+  <div class="sheet-body">
+    <p style="font-size:12px; font-weight:600; color:var(--text-tertiary); margin-bottom:10px; text-transform:uppercase; letter-spacing:0.4px;">조도 센서</p>
+    <div class="card-grid" style="margin-bottom:12px;">
+      <div class="metric"><p class="label">현재 조도</p><p class="value" id="s-light">-</p></div>
+      <div class="metric"><p class="label">밝기 상태</p><p class="value" id="s-level">-</p></div>
+      <div class="metric"><p class="label">원시값</p><p class="value" id="s-raw">-</p></div>
+      <div class="metric"><p class="label">측정 시각</p><p class="value" id="s-time" style="font-size:14px;">-</p></div>
+    </div>
+    <div style="margin-bottom:6px; display:flex; justify-content:space-between; font-size:11px; color:var(--text-tertiary);"><span>어두움</span><span>밝음</span></div>
+    <div style="background:var(--border); border-radius:8px; height:10px; overflow:hidden; margin-bottom:20px;">
+      <div id="s-gauge" style="height:100%; border-radius:8px; background:linear-gradient(to right,#534AB7,#E8A838,#E8C838); width:0%; transition:width 0.5s;"></div>
+    </div>
+    <div class="chart-box" id="sensorChartBox" style="display:none; margin-bottom:16px;"><canvas id="sensorChart"></canvas></div>
+    <p id="sensorChartEmpty" style="font-size:12px; color:var(--text-tertiary); margin-bottom:16px;">조도 데이터 수신 중...</p>
+    <p style="font-size:12px; font-weight:600; color:var(--text-tertiary); margin-bottom:10px; text-transform:uppercase; letter-spacing:0.4px;">움직임 감지 (PIR)</p>
+    <div class="card-grid" style="margin-bottom:16px;">
+      <div class="metric"><p class="label">현재 상태</p><p class="value" id="s-pir-status">-</p></div>
+      <div class="metric"><p class="label">센서 ID</p><p class="value" id="s-pir-id">-</p></div>
+      <div class="metric"><p class="label">마지막 감지</p><p class="value" id="s-pir-time" style="font-size:14px;">-</p></div>
+    </div>
+    <p style="font-size:12px; font-weight:600; color:var(--text-tertiary); margin-bottom:10px; text-transform:uppercase; letter-spacing:0.4px;">LiDAR 거리 감지</p>
+    <div class="card-grid" style="margin-bottom:12px;">
+      <div class="metric"><p class="label">현재 거리</p><p class="value" id="s-lidar-dist">-</p></div>
+      <div class="metric"><p class="label">재실 상태</p><p class="value" id="s-lidar-status">-</p></div>
+      <div class="metric"><p class="label">측정 시각</p><p class="value" id="s-lidar-time" style="font-size:14px;">-</p></div>
+    </div>
+    <div class="chart-box" id="lidarChartBox" style="display:none; margin-bottom:12px;"><canvas id="lidarChart"></canvas></div>
+    <p id="lidarChartEmpty" style="font-size:12px; color:var(--text-tertiary); margin-bottom:12px;">LiDAR 데이터 수신 중...</p>
+    <p style="font-size:11px; font-weight:600; color:var(--text-tertiary); margin-bottom:6px; text-transform:uppercase; letter-spacing:0.4px;">LiDAR 수신 로그</p>
+    <div style="overflow-x:auto; margin-bottom:16px;">
+      <table id="lidarLogTable" style="width:100%; border-collapse:collapse; font-size:12px;">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border);">
+            <th style="text-align:left; padding:4px 8px; color:var(--text-tertiary); font-weight:600;">시각</th>
+            <th style="text-align:right; padding:4px 8px; color:var(--text-tertiary); font-weight:600;">거리 (cm)</th>
+            <th style="text-align:center; padding:4px 8px; color:var(--text-tertiary); font-weight:600;">상태</th>
+          </tr>
+        </thead>
+        <tbody id="lidarLogBody">
+          <tr><td colspan="3" style="padding:8px; color:var(--text-tertiary); text-align:center;">-</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:11px; font-weight:600; color:var(--text-tertiary); margin-bottom:6px; text-transform:uppercase; letter-spacing:0.4px;">PIR 수신 로그</p>
+    <div style="overflow-x:auto;">
+      <table id="pirLogTable" style="width:100%; border-collapse:collapse; font-size:12px;">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border);">
+            <th style="text-align:left; padding:4px 8px; color:var(--text-tertiary); font-weight:600;">시각</th>
+            <th style="text-align:center; padding:4px 8px; color:var(--text-tertiary); font-weight:600;">상태</th>
+          </tr>
+        </thead>
+        <tbody id="pirLogBody">
+          <tr><td colspan="2" style="padding:8px; color:var(--text-tertiary); text-align:center;">-</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- 바텀 시트: 날씨 -->
+<div class="sheet" id="sheet-weather">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><span class="sheet-title">날씨</span><button class="sheet-close" onclick="closeSheet()">✕</button></div>
+  <div class="sheet-body">
+    <p id="w-location" style="font-size:12px; color:var(--text-tertiary); margin-bottom:14px;"></p>
+    <div class="card-grid" style="margin-bottom:16px;">
+      <div class="metric"><p class="label">기온</p><p class="value" id="w-temp">-</p></div>
+      <div class="metric"><p class="label">하늘 상태</p><p class="value" id="w-sky">-</p></div>
+      <div class="metric"><p class="label">습도</p><p class="value" id="w-humidity">-</p></div>
+      <div class="metric"><p class="label">풍속</p><p class="value" id="w-wind">-</p></div>
+      <div class="metric"><p class="label">강수형태</p><p class="value" id="w-rain">-</p></div>
+      <div class="metric"><p class="label">강수량</p><p class="value" id="w-rain-amount">-</p></div>
+    </div>
+    <p style="font-size:12px; font-weight:600; color:var(--text-tertiary); margin-bottom:10px; text-transform:uppercase; letter-spacing:0.4px;">수면 환경 조언</p>
+    <div id="w-advice" style="font-size:13px; color:var(--text-secondary);">날씨 데이터를 불러오는 중...</div>
+  </div>
+</div>
+
+<!-- 바텀 시트: 이상 감지 기록 -->
+<div class="sheet" id="sheet-alerts">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><span class="sheet-title">이상 감지 기록</span><button class="sheet-close" onclick="closeSheet()">✕</button></div>
+  <div class="sheet-body" id="alertCard"></div>
+</div>
+<!-- 이상 예외 처리 모달 -->
+<div id="overrideModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:200; align-items:center; justify-content:center;">
+  <div style="background:var(--card-bg); border-radius:16px; padding:24px; max-width:360px; width:90%; margin:auto;">
+    <p style="font-size:16px; font-weight:500; margin:0 0 8px;">이상 예외 처리</p>
+    <p style="font-size:13px; color:var(--text-secondary); margin:0 0 16px;" id="overrideModalDesc"></p>
+    <p style="font-size:13px; margin:0 0 8px;">사유 선택</p>
+    <select id="overrideReason" style="width:100%; padding:8px; border-radius:8px; border:1px solid var(--border); background:var(--surface); color:var(--text-primary); font-size:13px; margin-bottom:12px; box-sizing:border-box;">
+      <option value="자세 문제로 SpO2 오측정">자세 문제로 SpO2 오측정</option>
+      <option value="심박수 일시적 상승 (운동 등)">심박수 일시적 상승 (운동 등)</option>
+      <option value="수면 시간 의도적 단축">수면 시간 의도적 단축</option>
+      <option value="기기 측정 오류">기기 측정 오류</option>
+      <option value="직접 입력">직접 입력...</option>
+    </select>
+    <input id="overrideCustomReason" type="text" placeholder="사유 직접 입력" style="display:none; width:100%; padding:8px; border-radius:8px; border:1px solid var(--border); background:var(--surface); color:var(--text-primary); font-size:13px; margin-bottom:12px; box-sizing:border-box;" />
+    <div style="display:flex; gap:8px; justify-content:flex-end;">
+      <button onclick="closeOverrideModal()" style="appearance:none; border:1px solid var(--border); background:var(--surface); color:var(--text-primary); border-radius:8px; padding:8px 16px; font-size:13px; cursor:pointer;">취소</button>
+      <button onclick="confirmOverride()" style="appearance:none; border:none; background:#E24B4A; color:white; border-radius:8px; padding:8px 16px; font-size:13px; cursor:pointer; font-family:inherit;">예외 처리</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ====== 실시간 수면 데이터 (Firebase에서 수신) ====== */
+let sleepData = null;
+let weeklyHistory = [];   // sleep_summary 이번 주 (주간 요약용)
+let allHistory = [];      // sleep_summary 전체 (7일 추이 주간 넘기기용)
+let alerts = [];          // sleep_alerts에서 수신
+let weekOffset = 0;       // 0 = 이번 주, -1 = 지난 주, -2 = 2주 전 ...
+let napMap = {};          // nap_summary 전체 (날짜 → 낮잠 데이터)
+
+/* ====== 유틸 ====== */
+function minutesToHm(min) {
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return `${h}시간 ${m}분`;
+}
+function calcEfficiency(duration, inBed) {
+  return Math.round((duration / inBed) * 100);
+}
+function formatTime(iso) {
+  const d = new Date(iso);
+  return d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+/* ====== 이상 예외 처리 ====== */
+let overrideAlertKey = null;
+let overrideDateKey  = null;
+
+function openOverrideModal(alertKey, dateKey, desc) {
+  overrideAlertKey = alertKey;
+  overrideDateKey  = dateKey;
+  document.getElementById('overrideModalDesc').textContent =
+    `감지된 이상: ${desc || ''}`;
+  document.getElementById('overrideReason').value = '자세 문제로 SpO2 오측정';
+  document.getElementById('overrideCustomReason').style.display = 'none';
+  document.getElementById('overrideCustomReason').value = '';
+  document.getElementById('overrideModal').style.display = 'flex';
+}
+
+function closeOverrideModal() {
+  overrideAlertKey = null;
+  overrideDateKey  = null;
+  document.getElementById('overrideModal').style.display = 'none';
+}
+
+function confirmOverride() {
+  if (!overrideAlertKey) return;
+  const select = document.getElementById('overrideReason');
+  const custom = document.getElementById('overrideCustomReason');
+  const reason = select.value === '직접 입력' ? custom.value.trim() : select.value;
+  if (!reason) { alert('사유를 입력해주세요.'); return; }
+
+  const db     = window._firebaseDb;
+  const dbRef  = window._firebaseRef;
+  const dbUpd  = window._firebaseUpdate;
+  const deviceId = window._deviceId;
+  if (!db || !dbRef || !dbUpd || !deviceId) { alert('Firebase 연결이 준비되지 않았습니다.'); return; }
+
+  const nowKST = new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' });
+  const userPath = `users/${deviceId}`;
+
+  const promises = [];
+
+  // 1. sleep_alerts 항목 업데이트
+  promises.push(
+    dbUpd(dbRef(db, `${userPath}/sleep_alerts/${overrideAlertKey}`), {
+      overridden:   true,
+      overrideNote: reason,
+      overrideAt:   nowKST
+    })
+  );
+
+  // 2. sleep_summary 해당 날짜 업데이트
+  if (overrideDateKey) {
+    promises.push(
+      dbUpd(dbRef(db, `${userPath}/sleep_summary/${overrideDateKey}`), {
+        anomalyOverride:   true,
+        anomalyNote:       reason,
+        anomalyOverrideAt: nowKST
+      })
+    );
+
+    // 3. sleep_latest가 같은 날짜면 같이 업데이트
+    if (sleepData && sleepData.dateKey === overrideDateKey) {
+      promises.push(
+        dbUpd(dbRef(db, `${userPath}/sleep_latest`), {
+          anomalyOverride:   true,
+          anomalyNote:       reason,
+          anomalyOverrideAt: nowKST
+        })
+      );
+    }
+  }
+
+  Promise.all(promises)
+    .then(() => closeOverrideModal())
+    .catch((e) => {
+      console.error('예외 처리 저장 실패:', e);
+      alert('저장에 실패했습니다. 다시 시도해주세요.');
+    });
+}
+
+document.addEventListener('change', (e) => {
+  if (e.target.id === 'overrideReason') {
+    const custom = document.getElementById('overrideCustomReason');
+    custom.style.display = e.target.value === '직접 입력' ? 'block' : 'none';
+  }
+});
+
+/* ====== 이상 감지 pill 헬퍼 ====== */
+function anomalyPill(reasons, dateKey, isOverride, overrideNote) {
+  // 예외 처리된 상태
+  if (isOverride) {
+    return `
+      <span class="tooltip-wrap">
+        <span class="pill warn" style="cursor:pointer;">예외처리됨 ⓘ</span>
+        <span class="tooltip-box">사유: ${overrideNote || '미입력'}</span>
+      </span>`;
+  }
+  // 이상 감지된 상태 (툴팁으로 이유만 표시, 예외 처리는 이상 감지 기록 탭에서)
+  const tipText = (reasons && reasons.length > 0) ? reasons.join('\n') : '이상 감지됨';
+  return `
+    <span class="tooltip-wrap">
+      <span class="pill bad" style="cursor:pointer;">이상 있음 ⓘ</span>
+      <span class="tooltip-box" style="white-space:pre-line;">${tipText}</span>
+    </span>`;
+}
+
+/* ====== 수면 점수 등급 분류 ====== */
+function sleepScoreGrade(score) {
+  if (score >= 85) return { label: '매우 좋음', cls: 'blue' };
+  if (score >= 75) return { label: '좋음',     cls: 'ok' };
+  if (score >= 60) return { label: '보통',     cls: 'yellow' };
+  return                  { label: '관심 필요', cls: 'orange' };
+}
+
+/* ====== 오늘 요약 렌더 ====== */
+function renderOverview() {
+  if (!sleepData) {
+    document.getElementById('todayLabel').textContent = '데이터 대기 중';
+    document.getElementById('m-duration').textContent = '-';
+    document.getElementById('m-start').textContent = '-';
+    document.getElementById('m-end').textContent = '-';
+    document.getElementById('m-score-num').textContent = '-';
+    document.getElementById('m-efficiency').textContent = '-';
+    document.getElementById('m-hr').textContent = '-';
+    document.getElementById('m-spo2').textContent = '-';
+    return;
+  }
+
+  // 날짜 라벨
+  const end = new Date(sleepData.endTime);
+  document.getElementById('todayLabel').textContent =
+    end.toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'long' });
+
+  // 수면 시간
+  document.getElementById('m-duration').textContent = minutesToHm(sleepData.durationMinutes);
+
+  // 취침/기상
+  document.getElementById('m-start').textContent = formatTime(sleepData.startTime);
+  document.getElementById('m-end').textContent   = formatTime(sleepData.endTime);
+
+  // 수면 효율
+  document.getElementById('m-efficiency').textContent =
+    sleepData.efficiency != null ? `${sleepData.efficiency}%` : '-';
+
+  // 수면 점수 + 링 + 등급
+  const scoreNumEl = document.getElementById('m-score-num');
+  const gradeEl    = document.getElementById('m-grade-label');
+  const badgeEl    = document.getElementById('m-anomaly-badge');
+  const ring       = document.getElementById('scoreRing');
+
+  if (sleepData.sleepScore != null) {
+    const score = sleepData.sleepScore;
+    const grade = sleepScoreGrade(score);
+    scoreNumEl.textContent = score;
+    if (gradeEl) gradeEl.textContent = grade.label;
+    if (badgeEl) badgeEl.textContent = grade.label;
+    if (ring) {
+      const circ   = 2 * Math.PI * 54;
+      const offset = circ * (1 - score / 100);
+      setTimeout(() => { ring.style.strokeDashoffset = offset; }, 150);
+      ring.style.stroke = grade.cls === 'blue'   ? '#a29bfe'
+                        : grade.cls === 'ok'     ? '#55efc4'
+                        : grade.cls === 'yellow' ? '#ffeaa7'
+                        : grade.cls === 'orange' ? '#fdcb6e'
+                        : '#ff7675';
+    }
+  } else {
+    scoreNumEl.textContent = '-';
+    if (gradeEl) gradeEl.textContent = '';
+    if (badgeEl) badgeEl.textContent = '';
+  }
+
+  // 심박수
+  document.getElementById('m-hr').textContent =
+    sleepData.heartRate ? sleepData.heartRate.avg : '-';
+
+  // SpO2
+  document.getElementById('m-spo2').textContent =
+    sleepData.spo2 ? sleepData.spo2.avg.toFixed(1) : '-';
+
+  // 심박수 시트용 상세값
+  if (sleepData.heartRate) {
+    const avgEl = document.getElementById('d-hr-avg');
+    const minEl = document.getElementById('d-hr-min');
+    const maxEl = document.getElementById('d-hr-max');
+    if (avgEl) avgEl.textContent = sleepData.heartRate.avg + ' bpm';
+    if (minEl) minEl.textContent = sleepData.heartRate.min + ' bpm';
+    if (maxEl) maxEl.textContent = sleepData.heartRate.max + ' bpm';
+  }
+
+  // SpO2 시트용 상세값
+  if (sleepData.spo2) {
+    const avgEl = document.getElementById('d-spo2-avg');
+    const minEl = document.getElementById('d-spo2-min');
+    if (avgEl) avgEl.textContent = sleepData.spo2.avg.toFixed(1) + '%';
+    if (minEl) minEl.textContent = sleepData.spo2.min.toFixed(1) + '%';
+  }
+
+  // 미니 카드 수면 단계 요약
+  const miniStages = document.getElementById('mini-stages-val');
+  if (miniStages) {
+    miniStages.textContent = sleepData.stages ? `깊은 ${sleepData.stages.deep}%` : '-';
+  }
+
+  // 미니 카드 이상 감지 요약
+  const miniAnomaly = document.getElementById('mini-anomaly-val');
+  if (miniAnomaly) {
+    if (sleepData.anomaly && !sleepData.anomalyOverride) {
+      miniAnomaly.textContent = '이상 감지';
+      miniAnomaly.style.color = 'var(--red)';
+    } else {
+      miniAnomaly.textContent = '정상';
+      miniAnomaly.style.color = 'var(--green)';
+    }
+  }
+
+  // 이상 감지 시트
+  const anomalyEl    = document.getElementById('m-anomaly');
+  const anomalyTitle = document.getElementById('m-anomaly-title');
+  const anomalyDot   = document.getElementById('m-anomaly-dot');
+
+  if (typeof sleepData.anomaly === 'boolean') {
+    if (sleepData.anomaly) {
+      if (anomalyTitle) anomalyTitle.textContent = '이상 감지됨';
+      if (anomalyDot)   anomalyDot.className = 'sh-alert-dot bad';
+      if (anomalyEl) anomalyEl.innerHTML = anomalyPill(
+        sleepData.anomalyReasons,
+        sleepData.dateKey || '',
+        sleepData.anomalyOverride,
+        sleepData.anomalyNote
+      );
+    } else {
+      if (anomalyTitle) anomalyTitle.textContent = '이상 없음';
+      if (anomalyDot)   anomalyDot.className = 'sh-alert-dot';
+      if (anomalyEl) { anomalyEl.textContent = '수면 패턴이 정상 범위예요.'; anomalyEl.className = 'sh-alert-sub'; }
+    }
+  } else {
+    if (anomalyTitle) anomalyTitle.textContent = '분석 중';
+    if (anomalyEl) { anomalyEl.textContent = '데이터를 수집하는 중입니다.'; anomalyEl.className = 'sh-alert-sub'; }
+  }
+}
+
+/* ====== 수면 단계 렌더 ====== */
+function renderStages() {
+  const stageMeta = [
+    { key: 'deep', name: '깊은 수면', color: '#534AB7' },
+    { key: 'rem', name: 'REM', color: '#1D9E75' },
+    { key: 'light', name: '얕은 수면', color: '#85B7EB' },
+    { key: 'awake', name: '수면 중 깸', color: '#E24B4A' }
+  ];
+
+  const listEl = document.getElementById('stageList');
+
+  if (!sleepData || !sleepData.stages) {
+    listEl.innerHTML = `<p style="font-size:13px; color:var(--text-secondary); margin:0;">아직 단계별 수면 데이터가 전송되지 않았습니다.</p>`;
+    return;
+  }
+
+  listEl.innerHTML = stageMeta.map(s => `
+    <div class="stage-row">
+      <span class="swatch" style="background:${s.color}"></span>
+      <span class="name">${s.name}</span>
+      <span class="bar-bg"><span class="bar-fill" style="width:${sleepData.stages[s.key]}%; background:${s.color}"></span></span>
+      <span class="pct">${sleepData.stages[s.key]}%</span>
+    </div>
+  `).join('');
+
+  new Chart(document.getElementById('stageDonut'), {
+    type: 'doughnut',
+    data: {
+      labels: stageMeta.map(s => s.name),
+      datasets: [{
+        data: stageMeta.map(s => sleepData.stages[s.key]),
+        backgroundColor: stageMeta.map(s => s.color),
+        borderWidth: 0
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '68%',
+      plugins: { legend: { display: false } }
+    }
+  });
+}
+
+/* ====== 주간 요약 렌더 ====== */
+function renderWeekly() {
+  const grid    = document.getElementById('weeklyAvgGrid');
+  const zCard   = document.getElementById('weeklyZCard');
+  const stageEl = document.getElementById('weeklyStageList');
+  const rangeEl = document.getElementById('weeklyRange');
+
+  if (weeklyHistory.length === 0) {
+    rangeEl.textContent = '';
+    grid.innerHTML  = `<p style="font-size:13px;color:var(--text-secondary);">데이터가 없습니다.</p>`;
+    zCard.innerHTML = '';
+    stageEl.innerHTML = '';
+    return;
+  }
+
+  // ===== 기간 표시 =====
+  const formatDateKey = (dateKey) => {
+    const [, m, d] = dateKey.split('-');
+    return `${parseInt(m)}월 ${parseInt(d)}일`;
+  };
+
+  // 이번 주 월~일 범위 계산 (표시용, KST 기준)
+  const nowKST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Seoul' }));
+  const day = nowKST.getDay();
+  const diffToMonday = (day === 0 ? -6 : 1 - day);
+  const monday = new Date(nowKST);
+  monday.setDate(nowKST.getDate() + diffToMonday);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+
+  const toDateKey = (date) => {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+
+  const mondayLabel = formatDateKey(toDateKey(monday));
+  const sundayLabel = formatDateKey(toDateKey(sunday));
+  const collectedDays = weeklyHistory.length;
+
+  rangeEl.textContent = `📅 ${mondayLabel} (월) ~ ${sundayLabel} (일) — ${collectedDays}일 수집됨`;
+
+
+  // ===== 평균 계산 =====
+  const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+  const std = (arr) => {
+    if (arr.length < 2) return 0;
+    const m = avg(arr);
+    return Math.sqrt(arr.map(x => (x - m) ** 2).reduce((a, b) => a + b, 0) / arr.length);
+  };
+
+  const durations  = weeklyHistory.map(d => d.durationMinutes).filter(v => v != null);
+  const scores     = weeklyHistory.map(d => d.sleepScore).filter(v => v != null);
+  const efficiencies = weeklyHistory.map(d => d.efficiency).filter(v => v != null);
+  const hrs        = weeklyHistory.map(d => d.heartRate?.avg).filter(v => v != null);
+  const spo2s      = weeklyHistory.map(d => d.spo2?.avg).filter(v => v != null);
+
+  const avgDuration   = avg(durations);
+  const avgScore      = avg(scores);
+  const avgEfficiency = avg(efficiencies);
+  const avgHr         = avg(hrs);
+  const avgSpo2       = avg(spo2s);
+
+  // ===== 평균 카드 =====
+  const dH = avgDuration ? Math.floor(avgDuration / 60) : null;
+  const dM = avgDuration ? Math.round(avgDuration % 60) : null;
+
+  grid.innerHTML = [
+    { label: '평균 수면 시간', value: avgDuration ? `${dH}시간 ${dM}분` : '-', cls: '' },
+    { label: '평균 수면 점수', value: avgScore ? `${avgScore.toFixed(1)}점` : '-',
+      cls: avgScore >= 85 ? 'ok' : avgScore >= 75 ? 'ok' : avgScore >= 60 ? 'warn' : 'bad' },
+    { label: '평균 수면 효율', value: avgEfficiency ? `${avgEfficiency.toFixed(1)}%` : '-', cls: '' },
+    { label: '평균 심박수',   value: avgHr   ? `${avgHr.toFixed(1)} bpm` : '-', cls: '' },
+    { label: '평균 SpO2',    value: avgSpo2  ? `${avgSpo2.toFixed(1)}%`  : '-', cls: '' },
+    { label: '분석 기간',    value: `${weeklyHistory.length}일`, cls: '' },
+  ].map(m => `
+    <div class="metric">
+      <p class="label">${m.label}</p>
+      <p class="value ${m.cls}">${m.value}</p>
+    </div>
+  `).join('');
+
+  // ===== Z-score 분석 =====
+  // 오늘(가장 최근) vs 나머지 기간 비교
+  // ===== 지난 주 데이터 추출 =====
+  const prevWeekRange = getWeekRange(-1);
+  const prevWeekData = allHistory.filter(d =>
+    d.dateKey >= prevWeekRange.mondayKey && d.dateKey <= prevWeekRange.sundayKey
+  );
+
+  // ===== Z-score 분석: 이번 주 평균 vs 지난 주 평균 =====
+  if (prevWeekData.length === 0) {
+    zCard.innerHTML = `<p style="font-size:13px;color:var(--text-secondary);">지난 주 데이터가 없어 비교 분석을 할 수 없습니다.</p>`;
+  } else {
+    const prevDurations  = prevWeekData.map(d => d.durationMinutes).filter(v => v != null);
+    const prevScores     = prevWeekData.map(d => d.sleepScore).filter(v => v != null);
+    const prevHrs        = prevWeekData.map(d => d.heartRate?.avg).filter(v => v != null);
+    const prevSpo2s      = prevWeekData.map(d => d.spo2?.avg).filter(v => v != null);
+
+    const prevAvgDuration = avg(prevDurations);
+    const prevAvgScore    = avg(prevScores);
+    const prevAvgHr       = avg(prevHrs);
+    const prevAvgSpo2     = avg(prevSpo2s);
+
+    // Z-score: (이번 주 평균 - 지난 주 평균) / 지난 주 표준편차
+    const weekZScore = (thisVal, prevArr) => {
+      if (thisVal == null || prevArr.length < 2) return null;
+      const m = avg(prevArr);
+      const s = std(prevArr);
+      return s < 0.001 ? 0 : (thisVal - m) / s;
+    };
+
+    const zLabel = (z, higherIsBetter = true) => {
+      if (z == null) return { text: '-', cls: '' };
+      const abs = Math.abs(z);
+      const improved = higherIsBetter ? z > 0 : z < 0;
+      if (abs < 0.5) return { text: `${z.toFixed(2)} (비슷함)`, cls: '' };
+      if (abs < 1.5) return { text: `${z.toFixed(2)} (${improved ? '지난 주보다 좋음' : '지난 주보다 낮음'})`, cls: improved ? 'ok' : 'warn' };
+      return { text: `${z.toFixed(2)} (${improved ? '크게 향상' : '주의 필요'})`, cls: improved ? 'ok' : 'bad' };
+    };
+
+    const fmtDur = (min) => {
+      if (min == null) return '-';
+      return `${Math.floor(min/60)}시간 ${Math.round(min%60)}분`;
+    };
+
+    const items = [
+      {
+        name: '수면 시간',
+        thisVal: fmtDur(avgDuration),
+        prevVal: fmtDur(prevAvgDuration),
+        z: weekZScore(avgDuration, prevDurations),
+        higher: true
+      },
+      {
+        name: '수면 점수',
+        thisVal: avgScore ? `${avgScore.toFixed(1)}점` : '-',
+        prevVal: prevAvgScore ? `${prevAvgScore.toFixed(1)}점` : '-',
+        z: weekZScore(avgScore, prevScores),
+        higher: true
+      },
+      {
+        name: '심박수',
+        thisVal: avgHr ? `${avgHr.toFixed(1)}bpm` : '-',
+        prevVal: prevAvgHr ? `${prevAvgHr.toFixed(1)}bpm` : '-',
+        z: weekZScore(avgHr, prevHrs),
+        higher: false
+      },
+      {
+        name: 'SpO2',
+        thisVal: avgSpo2 ? `${avgSpo2.toFixed(1)}%` : '-',
+        prevVal: prevAvgSpo2 ? `${prevAvgSpo2.toFixed(1)}%` : '-',
+        z: weekZScore(avgSpo2, prevSpo2s),
+        higher: true
+      },
+    ];
+
+    zCard.innerHTML = `
+      <table class="history-table">
+        <thead>
+          <tr>
+            <th>항목</th>
+            <th>이번 주 평균</th>
+            <th>지난 주 평균</th>
+            <th>변화</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${items.map(item => {
+            const lbl = zLabel(item.z, item.higher);
+            return `<tr>
+              <td>${item.name}</td>
+              <td>${item.thisVal}</td>
+              <td>${item.prevVal}</td>
+              <td><span class="pill ${lbl.cls}" style="font-size:12px;">${lbl.text}</span></td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      <p style="font-size:11px;color:var(--text-tertiary);margin:10px 0 0;">
+        Z-score: 이번 주 평균이 지난 주 대비 얼마나 변화했는지를 나타냅니다.<br>
+        |Z| &lt; 0.5 = 비슷함 &nbsp;|&nbsp; 0.5~1.5 = 변화 있음 &nbsp;|&nbsp; &gt; 1.5 = 큰 변화
+      </p>
+    `;
+  }
+
+  // ===== 주간 평균 수면 단계 =====
+  const stageMeta = [
+    { key: 'deep',  name: '깊은 수면',  color: '#534AB7' },
+    { key: 'rem',   name: 'REM',        color: '#1D9E75' },
+    { key: 'light', name: '얕은 수면',  color: '#85B7EB' },
+    { key: 'awake', name: '수면 중 깸', color: '#E24B4A' }
+  ];
+
+  const daysWithStages = weeklyHistory.filter(d => d.stages);
+  if (daysWithStages.length === 0) {
+    stageEl.innerHTML = `<p style="font-size:13px;color:var(--text-secondary);margin:0;">수면 단계 데이터가 없습니다.</p>`;
+    return;
+  }
+
+  stageEl.innerHTML = stageMeta.map(s => {
+    const vals = daysWithStages.map(d => d.stages[s.key]).filter(v => v != null);
+    const avgPct = vals.length ? Math.round(avg(vals)) : 0;
+    return `
+      <div class="stage-row">
+        <span class="swatch" style="background:${s.color}"></span>
+        <span class="name">${s.name}</span>
+        <span class="bar-bg"><span class="bar-fill" style="width:${avgPct}%;background:${s.color}"></span></span>
+        <span class="pct">${avgPct}%</span>
+      </div>`;
+  }).join('');
+}
+
+/* ====== 주간 유틸 ====== */
+function getWeekRange(offset) {
+  const nowKST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Seoul' }));
+  const day = nowKST.getDay();
+  const diffToMonday = (day === 0 ? -6 : 1 - day);
+  const monday = new Date(nowKST);
+  monday.setDate(nowKST.getDate() + diffToMonday + offset * 7);
+  monday.setHours(0, 0, 0, 0);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  sunday.setHours(23, 59, 59, 999);
+  const toKey = (date) => {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+  const toLabel = (date) => `${date.getMonth() + 1}월 ${date.getDate()}일`;
+  return {
+    mondayKey: toKey(monday),
+    sundayKey: toKey(sunday),
+    label: `${toLabel(monday)} (월) ~ ${toLabel(sunday)} (일)`
+  };
+}
+
+function changeWeek(dir) {
+  const newOffset = weekOffset + dir;
+  // 미래로는 못 넘어가게
+  if (newOffset > 0) return;
+  // 데이터 없는 과거 주로는 못 넘어가게
+  const { mondayKey } = getWeekRange(newOffset);
+  const hasData = allHistory.some(d => d.dateKey >= mondayKey);
+  if (!hasData && newOffset < weekOffset) return;
+  weekOffset = newOffset;
+  renderTrend();
+}
+
+/* ====== 7일 추이 렌더 ====== */
+let trendChartInstance = null;
+
+function renderTrend() {
+  const chartBox = document.getElementById('trendChartBox');
+  const emptyMsg = document.getElementById('trendEmpty');
+  const prevBtn  = document.getElementById('prevWeekBtn');
+  const nextBtn  = document.getElementById('nextWeekBtn');
+  const rangeLabel = document.getElementById('weekRangeLabel');
+
+  const { mondayKey, sundayKey, label } = getWeekRange(weekOffset);
+  rangeLabel.textContent = label;
+
+  // 이전/다음 버튼 활성화 제어
+  nextBtn.style.opacity = weekOffset === 0 ? '0.3' : '1';
+  nextBtn.style.pointerEvents = weekOffset === 0 ? 'none' : 'auto';
+  const prevRange = getWeekRange(weekOffset - 1);
+  const hasPrev = allHistory.some(d => d.dateKey >= prevRange.mondayKey && d.dateKey <= prevRange.sundayKey);
+  prevBtn.style.opacity = hasPrev ? '1' : '0.3';
+  prevBtn.style.pointerEvents = hasPrev ? 'auto' : 'none';
+
+  // 해당 주 데이터 필터링
+  const weekData = allHistory.filter(d => d.dateKey >= mondayKey && d.dateKey <= sundayKey);
+
+  if (weekData.length === 0) {
+    chartBox.style.display = 'none';
+    emptyMsg.style.display = 'block';
+    document.getElementById('historyBody').innerHTML = '';
+    return;
+  }
+  chartBox.style.display = 'block';
+  emptyMsg.style.display = 'none';
+
+  const labels     = weekData.map(d => { const [, m, day] = d.dateKey.split('-'); return `${parseInt(m)}/${parseInt(day)}`; });
+  const hoursData  = weekData.map(d => Math.round((d.durationMinutes / 60) * 10) / 10);
+  const hoursLabel = weekData.map(d => {
+    const h = Math.floor(d.durationMinutes / 60);
+    const m = d.durationMinutes % 60;
+    return m === 0 ? `${h}시간` : `${h}시간 ${m}분`;
+  });
+  const scoreData = weekData.map(d => d.sleepScore  ?? null);
+  const effData   = weekData.map(d => d.efficiency  ?? null);
+
+  // 낮잠 데이터
+  const napData      = weekData.map(d => napMap[d.dateKey] ? Math.round((napMap[d.dateKey].totalNapMinutes / 60) * 10) / 10 : null);
+  const napLabelArr  = weekData.map(d => {
+    const nap = napMap[d.dateKey];
+    if (!nap) return null;
+    const h = Math.floor(nap.totalNapMinutes / 60);
+    const m = nap.totalNapMinutes % 60;
+    return m === 0 ? `${h}시간` : `${h}시간 ${m}분`;
+  });
+  const hasNapData = napData.some(v => v != null);
+
+  if (trendChartInstance) trendChartInstance.destroy();
+
+  const datasets = [
+    {
+      type: 'bar',
+      label: '수면 점수',
+      data: scoreData,
+      backgroundColor: 'rgba(29,158,117,0.75)',
+      borderRadius: 4,
+      yAxisID: 'y',
+      order: 3
+    },
+    {
+      type: 'line',
+      label: '수면 효율',
+      data: effData,
+      borderColor: '#E8A838',
+      backgroundColor: '#E8A838',
+      pointRadius: 3,
+      tension: 0.3,
+      borderDash: [4, 3],
+      yAxisID: 'y',
+      order: 2
+    },
+    {
+      type: 'line',
+      label: '수면 시간',
+      data: hoursData,
+      borderColor: '#7F77DD',
+      backgroundColor: '#7F77DD',
+      pointRadius: 3,
+      tension: 0.3,
+      yAxisID: 'y1',
+      order: 1
+    }
+  ];
+
+  // 낮잠 데이터가 있으면 차트에 추가
+  if (hasNapData) {
+    datasets.push({
+      type: 'bar',
+      label: '낮잠 시간',
+      data: napData,
+      backgroundColor: 'rgba(255,165,0,0.5)',
+      borderRadius: 4,
+      yAxisID: 'y1',
+      order: 4
+    });
+  }
+
+  trendChartInstance = new Chart(document.getElementById('trendChart'), {
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          display: hasNapData,
+          position: 'top',
+          labels: { font: { size: 11 }, boxWidth: 12, padding: 10 }
+        }
+      },
+      scales: {
+        y:  { min: 0, max: 100, ticks: { callback: v => v, font: { size: 11 } }, grid: { color: 'rgba(128,128,128,0.1)' } },
+        y1: { position: 'right', min: 0, max: 12, ticks: { callback: v => v + 'h', font: { size: 11 } }, grid: { display: false } },
+        x:  { grid: { display: false }, ticks: { font: { size: 11 } } }
+      }
+    }
+  });
+
+  const tbody = document.getElementById('historyBody');
+  // 낮잠 데이터가 있으면 표 헤더도 업데이트
+  const historyHead = document.querySelector('.history-table thead tr');
+  if (historyHead) {
+    historyHead.innerHTML = `<th>날짜</th><th>취침</th><th>기상</th><th>수면 시간</th><th>점수</th><th>효율</th>${hasNapData ? '<th>낮잠</th>' : ''}<th>상태</th>`;
+  }
+
+  tbody.innerHTML = weekData.map((d, i) => {
+    const score = d.sleepScore;
+    const eff   = d.anomaly === true ? null : d.efficiency;
+    const nap   = napMap[d.dateKey];
+
+    // 취침/기상 시각
+    const bedTime  = d.startTime ? formatTime(d.startTime) : '-';
+    const wakeTime = d.endTime   ? formatTime(d.endTime)   : '-';
+
+    let statusPill;
+    if (d.anomaly === true) {
+      statusPill = anomalyPill(d.anomalyReasons, d.dateKey, d.anomalyOverride, d.anomalyNote);
+    } else if (score != null) {
+      const grade = sleepScoreGrade(score);
+      statusPill = `<span class="pill ${grade.cls}">${grade.label}</span>`;
+    } else if (eff != null) {
+      statusPill = eff >= 85
+        ? '<span class="pill ok">정상</span>'
+        : '<span class="pill warn">주의</span>';
+    } else {
+      statusPill = '<span class="pill warn">단계 데이터 없음</span>';
+    }
+
+    const napCell = hasNapData
+      ? `<td>${nap ? `<span style="color:#e08800; font-weight:600;">💤 ${napLabelArr[i]}</span>` : '-'}</td>`
+      : '';
+
+    return `<tr>
+      <td>${labels[i]}</td>
+      <td style="color:var(--text-secondary);">${bedTime}</td>
+      <td style="color:var(--text-secondary);">${wakeTime}</td>
+      <td>${hoursLabel[i]}</td>
+      <td>${score != null ? score + '점' : '-'}</td>
+      <td>${d.efficiency != null ? d.efficiency + '%' : '-'}</td>
+      ${napCell}
+      <td>${statusPill}</td>
+    </tr>`;
+  }).join('');
+
+  // ===== 주간 평균 요약 카드 =====
+  const trendAvgGrid = document.getElementById('trendAvgGrid');
+  const wavg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+
+  const wDurations = weekData.map(d => d.durationMinutes).filter(v => v != null);
+  const wScores    = weekData.map(d => d.sleepScore).filter(v => v != null);
+  const wHrs       = weekData.map(d => d.heartRate?.avg).filter(v => v != null);
+  const wSpo2s     = weekData.map(d => d.spo2?.avg).filter(v => v != null);
+
+  const wAvgDur   = wavg(wDurations);
+  const wAvgScore = wavg(wScores);
+  const wAvgHr    = wavg(wHrs);
+  const wAvgSpo2  = wavg(wSpo2s);
+
+  const wDurH = wAvgDur ? Math.floor(wAvgDur / 60) : null;
+  const wDurM = wAvgDur ? Math.round(wAvgDur % 60) : null;
+
+  const scoreGradeCls = wAvgScore
+    ? (wAvgScore >= 85 ? 'ok' : wAvgScore >= 75 ? 'ok' : wAvgScore >= 60 ? 'warn' : 'bad')
+    : '';
+
+  trendAvgGrid.innerHTML = [
+    { label: '평균 수면 시간', value: wAvgDur   ? `${wDurH}시간 ${wDurM}분`       : '-', cls: '' },
+    { label: '평균 수면 점수', value: wAvgScore ? `${wAvgScore.toFixed(1)}점`      : '-', cls: scoreGradeCls },
+    { label: '평균 심박수',   value: wAvgHr    ? `${wAvgHr.toFixed(1)} bpm`       : '-', cls: '' },
+    { label: '평균 SpO2',    value: wAvgSpo2   ? `${wAvgSpo2.toFixed(1)}%`        : '-', cls: '' },
+  ].map(m => `
+    <div class="metric">
+      <p class="label">${m.label}</p>
+      <p class="value ${m.cls}">${m.value}</p>
+    </div>
+  `).join('');
+}
+
+/* ====== 센서 데이터 ====== */
+let sensorHistory = [];
+let sensorChartInstance = null;
+
+function getLightLevel(pct) {
+  if (pct >= 80) return { text: '매우 밝음 ☀️', cls: 'ok' };
+  if (pct >= 60) return { text: '밝음 🌤️',     cls: 'ok' };
+  if (pct >= 40) return { text: '보통 🌥️',     cls: '' };
+  if (pct >= 20) return { text: '어두움 🌙',    cls: 'warn' };
+  return               { text: '매우 어두움 🌑', cls: 'warn' };
+}
+
+function renderSensor(data) {
+  const pct   = data.value ?? 0;
+  const raw   = data.raw   ?? '-';
+  const time  = data.timestamp ?? '-';
+  const level = getLightLevel(pct);
+
+  document.getElementById('s-light').textContent = pct + '%';
+  document.getElementById('s-raw').textContent   = raw + ' / 4095';
+  document.getElementById('s-level').textContent = level.text;
+  document.getElementById('s-level').className   = 'value ' + level.cls;
+  document.getElementById('s-time').textContent  = time.replace('T', ' ');
+  document.getElementById('s-gauge').style.width = pct + '%';
+
+  // 이력 추가 (최근 20개 유지)
+  sensorHistory.push({ time: time.slice(11, 16), value: pct });
+  if (sensorHistory.length > 20) sensorHistory.shift();
+
+  renderSensorChart();
+}
+
+function renderSensorChart() {
+  const box   = document.getElementById('sensorChartBox');
+  const empty = document.getElementById('sensorChartEmpty');
+
+  if (sensorHistory.length < 2) {
+    box.style.display   = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  box.style.display   = 'block';
+  empty.style.display = 'none';
+
+  if (sensorChartInstance) sensorChartInstance.destroy();
+
+  sensorChartInstance = new Chart(document.getElementById('sensorChart'), {
+    type: 'line',
+    data: {
+      labels: sensorHistory.map(d => d.time),
+      datasets: [{
+        label: '조도 (%)',
+        data: sensorHistory.map(d => d.value),
+        borderColor: '#E8A838',
+        backgroundColor: 'rgba(232,168,56,0.1)',
+        pointRadius: 3,
+        tension: 0.3,
+        fill: true
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { min: 0, max: 100, ticks: { callback: v => v + '%', font: { size: 11 } }, grid: { color: 'rgba(128,128,128,0.1)' } },
+        x: { grid: { display: false }, ticks: { font: { size: 11 } } }
+      }
+    }
+  });
+}
+
+window.addEventListener('sensorlight:update', (e) => {
+  renderSensor(e.detail);
+});
+
+/* ====== PIR 로그 ====== */
+const PIR_LOG_MAX = 20;
+let pirLog = [];
+
+function renderPirLog() {
+  const tbody = document.getElementById('pirLogBody');
+  if (!tbody) return;
+  if (pirLog.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="2" style="padding:8px; color:var(--text-tertiary); text-align:center;">-</td></tr>';
+    return;
+  }
+  tbody.innerHTML = pirLog.slice().reverse().map(row => `
+    <tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:4px 8px; color:var(--text-secondary);">${row.ts}</td>
+      <td style="padding:4px 8px; text-align:center; color:${row.motion ? 'var(--amber)' : 'var(--green)'};">${row.motion ? '움직임 🚶' : '조용함 😴'}</td>
+    </tr>`).join('');
+}
+
+window.addEventListener('sensorpir:update', (e) => {
+  const data   = e.detail;
+  const motion = data.motion;
+  const ts     = (data.timestamp || '-').replace('T', ' ');
+  const id     = data.sensorId ?? '-';
+
+  const statusEl = document.getElementById('s-pir-status');
+  if (motion) {
+    statusEl.textContent = '움직임 감지 🚶';
+    statusEl.className   = 'value warn';
+  } else {
+    statusEl.textContent = '조용함 😴';
+    statusEl.className   = 'value ok';
+  }
+  document.getElementById('s-pir-id').textContent   = 'PIR-' + id;
+  document.getElementById('s-pir-time').textContent = ts;
+
+  // 로그 누적 (중복 타임스탬프 스킵)
+  if (pirLog.length === 0 || pirLog[pirLog.length - 1].ts !== ts) {
+    pirLog.push({ ts, motion });
+    if (pirLog.length > PIR_LOG_MAX) pirLog.shift();
+    renderPirLog();
+  }
+});
+
+/* ====== LiDAR 히스토리 + 차트 ====== */
+const LIDAR_LOG_MAX = 20;
+let lidarHistory = [];
+let lidarChartInstance = null;
+
+function lidarOccupancy(dist) {
+  if (dist <= 50)  return { text: '재실 🧑',   color: 'var(--amber)' };
+  if (dist > 150)  return { text: '공석 💤',   color: 'var(--green)' };
+  return               { text: '감지 중 🔍', color: 'var(--text-secondary)' };
+}
+
+function renderLidarChart() {
+  const box   = document.getElementById('lidarChartBox');
+  const empty = document.getElementById('lidarChartEmpty');
+  if (!box) return;
+
+  if (lidarHistory.length < 2) {
+    box.style.display   = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  box.style.display   = 'block';
+  empty.style.display = 'none';
+
+  if (lidarChartInstance) lidarChartInstance.destroy();
+  lidarChartInstance = new Chart(document.getElementById('lidarChart'), {
+    type: 'line',
+    data: {
+      labels: lidarHistory.map(d => d.ts),
+      datasets: [{
+        label: '거리 (cm)',
+        data: lidarHistory.map(d => d.dist),
+        borderColor: '#5B8CFF',
+        backgroundColor: 'rgba(91,140,255,0.1)',
+        pointRadius: 3,
+        tension: 0.3,
+        fill: true
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: {
+          min: 0,
+          ticks: { callback: v => v + 'cm', font: { size: 11 } },
+          grid: { color: 'rgba(128,128,128,0.1)' },
+          // 기준선: 50cm(재실), 150cm(공석 경계)
+          afterDraw(chart) {
+            const ctx = chart.ctx;
+            [{ val: 50, color: 'rgba(255,150,50,0.5)', label: '재실 50' },
+             { val: 150, color: 'rgba(80,200,120,0.5)', label: '공석 150' }].forEach(line => {
+              const y = chart.scales.y.getPixelForValue(line.val);
+              ctx.save();
+              ctx.strokeStyle = line.color;
+              ctx.setLineDash([4, 4]);
+              ctx.lineWidth = 1;
+              ctx.beginPath();
+              ctx.moveTo(chart.chartArea.left, y);
+              ctx.lineTo(chart.chartArea.right, y);
+              ctx.stroke();
+              ctx.fillStyle = line.color;
+              ctx.font = '10px sans-serif';
+              ctx.fillText(line.label, chart.chartArea.left + 4, y - 3);
+              ctx.restore();
+            });
+          }
+        },
+        x: { grid: { display: false }, ticks: { font: { size: 11 } } }
+      }
+    }
+  });
+}
+
+function renderLidarLog() {
+  const tbody = document.getElementById('lidarLogBody');
+  if (!tbody) return;
+  if (lidarHistory.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="3" style="padding:8px; color:var(--text-tertiary); text-align:center;">-</td></tr>';
+    return;
+  }
+  tbody.innerHTML = lidarHistory.slice().reverse().map(row => {
+    const occ = lidarOccupancy(row.dist);
+    return `
+    <tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:4px 8px; color:var(--text-secondary);">${row.ts}</td>
+      <td style="padding:4px 8px; text-align:right; font-variant-numeric:tabular-nums;">${row.dist}</td>
+      <td style="padding:4px 8px; text-align:center; color:${occ.color};">${occ.text}</td>
+    </tr>`;
+  }).join('');
+}
+
+window.addEventListener('sensorlidar:update', (e) => {
+  const data = e.detail;
+  const dist = data.distance ?? null;
+  const ts   = (data.timestamp || '-').replace('T', ' ');
+
+  const distEl   = document.getElementById('s-lidar-dist');
+  const statusEl = document.getElementById('s-lidar-status');
+
+  if (dist !== null) {
+    distEl.textContent = dist + ' cm';
+    const occ = lidarOccupancy(dist);
+    statusEl.textContent = occ.text;
+    statusEl.className   = dist <= 50 ? 'value warn' : dist > 150 ? 'value ok' : 'value';
+  } else {
+    distEl.textContent   = '-';
+    statusEl.textContent = '-';
+    statusEl.className   = 'value';
+  }
+  document.getElementById('s-lidar-time').textContent = ts;
+
+  // 미니 카드 값 업데이트
+  const miniEl = document.getElementById('mini-sensor-val');
+  if (miniEl && dist !== null) miniEl.textContent = dist + ' cm';
+
+  // 히스토리 누적 (중복 타임스탬프 스킵)
+  if (dist !== null && (lidarHistory.length === 0 || lidarHistory[lidarHistory.length - 1].ts !== ts)) {
+    lidarHistory.push({ ts: ts.slice(11, 16) || ts, dist });
+    if (lidarHistory.length > LIDAR_LOG_MAX) lidarHistory.shift();
+    renderLidarChart();
+    renderLidarLog();
+  }
+});
+
+/* ====== 기상청 단기예보 API ====== */
+const WEATHER_API_KEY = '71c0a38ee20c68d98c0cfdb991f6b31402dbfdfd261fd4a9b39357e04bd5a11d';
+
+function getWeatherBaseTime() {
+  const now = new Date();
+  const h   = now.getHours();
+  const m   = now.getMinutes();
+  // 초단기실황은 매 정시 발표, 40분 이후 데이터 안정
+  const baseHour = m < 40 ? h - 1 : h;
+  const safeHour = ((baseHour % 24) + 24) % 24;
+  return String(safeHour).padStart(2, '0') + '00';
+}
+
+function getWeatherBaseDate() {
+  const now  = new Date();
+  const kst  = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+  const y    = kst.getUTCFullYear();
+  const m    = String(kst.getUTCMonth() + 1).padStart(2, '0');
+  const d    = String(kst.getUTCDate()).padStart(2, '0');
+  return `${y}${m}${d}`;
+}
+
+function skyLabel(val) {
+  const v = parseInt(val);
+  if (v === 1) return '맑음 ☀️';
+  if (v === 3) return '구름많음 ⛅';
+  if (v === 4) return '흐림 ☁️';
+  return '-';
+}
+
+function ptyLabel(val) {
+  const v = parseInt(val);
+  if (v === 0) return '없음';
+  if (v === 1) return '비 🌧️';
+  if (v === 2) return '비/눈 🌨️';
+  if (v === 3) return '눈 ❄️';
+  if (v === 4) return '소나기 🌦️';
+  return '-';
+}
+
+function weatherAdvice(temp, sky, pty, humidity) {
+  const t   = parseFloat(temp);
+  const s   = parseInt(sky);
+  const p   = parseInt(pty);
+  const h   = parseFloat(humidity);
+  const tips = [];
+
+  // 기온 기반
+  if (t >= 26) tips.push('🌡️ 실내 온도가 높아요. 에어컨이나 선풍기로 침실을 서늘하게 (18~22°C) 유지해 주세요.');
+  else if (t <= 10) tips.push('🥶 기온이 낮아요. 침실이 너무 춥지 않도록 적절히 난방해 주세요.');
+  else tips.push('🌡️ 수면에 적합한 기온이에요. 침실 온도를 18~22°C로 유지해 주세요.');
+
+  // 습도 기반
+  if (h >= 80) tips.push('💧 습도가 높아요. 제습기나 에어컨을 활용해 습도를 낮춰주세요.');
+  else if (h <= 30) tips.push('🏜️ 건조해요. 가습기를 사용하거나 물 한 잔 마시고 주무세요.');
+  else tips.push('💨 습도가 적절해요. 쾌적한 수면 환경이에요.');
+
+  // 강수 기반
+  if (p > 0) tips.push('🌧️ 비나 눈이 내리고 있어요. 창문을 닫아 소음을 줄여주세요.');
+
+  // 날씨 기반
+  if (s === 1 && p === 0) tips.push('☀️ 맑은 날씨예요. 낮에 햇빛을 충분히 쬐면 수면의 질이 높아져요.');
+
+  return tips;
+}
+
+/* ====== 위도/경도 → 기상청 격자 좌표 변환 ====== */
+function latLonToGrid(lat, lon) {
+  const RE = 6371.00877, GRID = 5.0, SLAT1 = 30.0, SLAT2 = 60.0;
+  const OLON = 126.0, OLAT = 38.0, XO = 43, YO = 136;
+  const DEGRAD = Math.PI / 180.0;
+  const re = RE / GRID;
+  const slat1 = SLAT1 * DEGRAD, slat2 = SLAT2 * DEGRAD;
+  const olon = OLON * DEGRAD, olat = OLAT * DEGRAD;
+  let sn = Math.tan(Math.PI * 0.25 + slat2 * 0.5) / Math.tan(Math.PI * 0.25 + slat1 * 0.5);
+  sn = Math.log(Math.cos(slat1) / Math.cos(slat2)) / Math.log(sn);
+  let sf = Math.pow(Math.tan(Math.PI * 0.25 + slat1 * 0.5), sn) * Math.cos(slat1) / sn;
+  let ro = re * sf / Math.pow(Math.tan(Math.PI * 0.25 + olat * 0.5), sn);
+  let ra = re * sf / Math.pow(Math.tan(Math.PI * 0.25 + lat * DEGRAD * 0.5), sn);
+  let theta = lon * DEGRAD - olon;
+  if (theta > Math.PI) theta -= 2.0 * Math.PI;
+  if (theta < -Math.PI) theta += 2.0 * Math.PI;
+  theta *= sn;
+  return {
+    nx: Math.floor(ra * Math.sin(theta) + XO + 0.5),
+    ny: Math.floor(ro - ra * Math.cos(theta) + YO + 0.5)
+  };
+}
+
+function updateWeatherCards(data, baseDate, baseTime, locationText) {
+  document.getElementById('w-temp').textContent        = data['T1H'] ? `${data['T1H']}°C` : '-';
+  document.getElementById('w-sky').textContent         = data['SKY'] ? skyLabel(data['SKY']) : '-';
+  document.getElementById('w-humidity').textContent    = data['REH'] ? `${data['REH']}%` : '-';
+  document.getElementById('w-wind').textContent        = data['WSD'] ? `${data['WSD']} m/s` : '-';
+  document.getElementById('w-rain').textContent        = data['PTY'] ? ptyLabel(data['PTY']) : '-';
+  document.getElementById('w-rain-amount').textContent = data['RN1'] ? (data['RN1'] === '0' ? '없음' : `${data['RN1']} mm`) : '-';
+
+  // 미니 날씨 카드 업데이트
+  const miniWeather = document.getElementById('mini-weather-val');
+  const miniWeatherSub = document.getElementById('mini-weather-sub');
+  if (miniWeather && data['T1H']) miniWeather.textContent = `${data['T1H']}°C`;
+  if (miniWeatherSub && data['SKY']) miniWeatherSub.textContent = skyLabel(data['SKY']);
+
+  const tips = weatherAdvice(data['T1H'] || 20, data['SKY'] || 1, data['PTY'] || 0, data['REH'] || 60);
+  document.getElementById('w-advice').innerHTML = tips.map(tip =>
+    `<p style="font-size:13px; margin:0 0 10px; line-height:1.6;">${tip}</p>`
+  ).join('');
+
+  document.getElementById('w-location').textContent =
+    `${locationText} · ${baseDate.slice(0,4)}-${baseDate.slice(4,6)}-${baseDate.slice(6,8)} ${baseTime.slice(0,2)}:00 발표`;
+}
+
+async function fetchWeatherWithGrid(nx, ny, locationText) {
+  const adviceEl = document.getElementById('w-advice');
+  try {
+    const baseDate = getWeatherBaseDate();
+    const baseTime = getWeatherBaseTime();
+    const url = `https://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getUltraSrtNcst` +
+      `?serviceKey=${WEATHER_API_KEY}&pageNo=1&numOfRows=100&dataType=JSON` +
+      `&base_date=${baseDate}&base_time=${baseTime}&nx=${nx}&ny=${ny}`;
+    const res   = await fetch(url);
+    const json  = await res.json();
+    const items = json?.response?.body?.items?.item || [];
+    if (items.length === 0) {
+      adviceEl.innerHTML = '<p style="font-size:13px; color:var(--text-secondary); margin:0;">날씨 데이터를 불러오지 못했습니다.</p>';
+      return;
+    }
+    const data = {};
+    items.forEach(item => { data[item.category] = item.obsrValue; });
+    updateWeatherCards(data, baseDate, baseTime, locationText);
+  } catch (e) {
+    adviceEl.innerHTML = `<p style="font-size:13px; color:var(--text-secondary); margin:0;">오류: ${e.message}</p>`;
+  }
+}
+
+/* ====== 역지오코딩 (위도/경도 → 주소) ====== */
+async function getAddress(lat, lon) {
+  const res = await fetch(
+    `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json&accept-language=ko`,
+    { headers: { 'User-Agent': 'SleepMonitor/1.0' } }
+  );
+  const json = await res.json();
+  const addr = json.address;
+  const dong = addr.quarter || addr.neighbourhood || addr.suburb
+             || addr.village || addr.town || '';
+  const gu   = addr.city_district || addr.county || '';
+  const city = addr.city || addr.municipality || '';
+  return `${city} ${gu} ${dong}`.trim().replace(/\s+/g, ' ');
+}
+
+async function fetchWeather() {
+  const adviceEl = document.getElementById('w-advice');
+  adviceEl.innerHTML = '<p style="font-size:13px; color:var(--text-secondary); margin:0;">위치 확인 중...</p>';
+
+  // 앱에서 주입한 위치 우선 사용
+  if (window._lat && window._lon) {
+    const { nx, ny } = latLonToGrid(window._lat, window._lon);
+    let locationLabel = `${window._lat.toFixed(3)}°N, ${window._lon.toFixed(3)}°E`;
+    try {
+      const address = await getAddress(window._lat, window._lon);
+      if (address) locationLabel = address;
+    } catch (e) {}
+    await fetchWeatherWithGrid(nx, ny, locationLabel);
+    const miniSub = document.getElementById('mini-weather-sub');
+    if (miniSub) miniSub.textContent = locationLabel;
+    return;
+  }
+
+  // 브라우저 Geolocation 시도
+  try {
+    const position = await new Promise((resolve, reject) => {
+      if (!navigator.geolocation) { reject({ code: 1 }); return; }
+      navigator.geolocation.getCurrentPosition(resolve, reject, {
+        timeout: 10000, maximumAge: 300000
+      });
+    });
+
+    const lat = position.coords.latitude;
+    const lon = position.coords.longitude;
+    const { nx, ny } = latLonToGrid(lat, lon);
+
+    let locationLabel = `${lat.toFixed(3)}°N, ${lon.toFixed(3)}°E`;
+    try {
+      const address = await getAddress(lat, lon);
+      if (address) locationLabel = address;
+    } catch (e) {}
+
+    adviceEl.innerHTML = '<p style="font-size:13px; color:var(--text-secondary); margin:0;">날씨 데이터를 불러오는 중...</p>';
+    await fetchWeatherWithGrid(nx, ny, locationLabel);
+    const miniSub = document.getElementById('mini-weather-sub');
+    if (miniSub) miniSub.textContent = locationLabel;
+
+  } catch (e) {
+    const miniSub = document.getElementById('mini-weather-sub');
+    if (miniSub) miniSub.textContent = '순천시 기준';
+    document.getElementById('w-location').textContent = '위치 권한 거부 → 순천시 기준';
+    adviceEl.innerHTML = '<p style="font-size:13px; color:var(--text-secondary); margin:0;">날씨 데이터를 불러오는 중...</p>';
+    await fetchWeatherWithGrid(74, 74, '순천시 기준');
+  }
+}
+
+// 날씨 탭 클릭 시 자동 로드
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelector('[data-tab="weather"]')?.addEventListener('click', () => {
+    fetchWeather();
+  });
+});
+
+/* ====== 이상 감지 기록 렌더 ====== */
+function renderAlerts() {
+  const card = document.getElementById('alertCard');
+  if (!alerts || alerts.length === 0) {
+    card.innerHTML = `<p style="font-size:13px; color:var(--text-secondary); margin:0;">최근 이상 감지 기록이 없습니다.</p>`;
+    return;
+  }
+  card.innerHTML = alerts.map(a => {
+    const timeLabel = a.time
+      ? formatTime(a.time) + (a.date ? ` (${a.date.slice(5).replace('-', '/')})` : '')
+      : '';
+
+    if (a.overridden) {
+      // 예외 처리된 항목
+      return `
+      <div class="alert-row" style="opacity:0.5;">
+        <span class="alert-dot" style="background:var(--text-tertiary)"></span>
+        <div style="flex:1;">
+          <p class="alert-title" style="text-decoration:line-through;">${a.title}</p>
+          <p class="alert-desc">${a.desc}</p>
+          <p style="font-size:11px; color:var(--text-tertiary); margin:2px 0 0;">예외 처리됨 — ${a.overrideNote || '사유 없음'}</p>
+        </div>
+        <span class="alert-time">${timeLabel}</span>
+      </div>`;
+    }
+
+    // 이상 감지 항목 (예외 처리 버튼 포함)
+    const safeKey  = a.alertKey || '';
+    const safeDate = a.date || '';
+    const safeDesc = (a.desc || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    return `
+      <div class="alert-row">
+        <span class="alert-dot" style="background:#854f0b"></span>
+        <div style="flex:1;">
+          <p class="alert-title">${a.title}</p>
+          <p class="alert-desc">${a.desc}</p>
+        </div>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px; flex-shrink:0;">
+          <span class="alert-time">${timeLabel}</span>
+          <button
+            data-alert-key="${safeKey}"
+            data-date="${safeDate}"
+            data-desc="${safeDesc}"
+            onclick="openOverrideModal(this.dataset.alertKey, this.dataset.date, this.dataset.desc)"
+            style="appearance:none; border:1px solid var(--border); background:var(--surface); color:var(--text-secondary); border-radius:6px; padding:3px 10px; font-size:11px; cursor:pointer; font-family:inherit; white-space:nowrap;">
+            예외 처리
+          </button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+/* ====== deviceId 없을 때 입력 화면 ====== */
+window.addEventListener('nodeviceid', () => {
+  document.querySelector('.wrap').innerHTML = `
+    <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:60vh; gap:16px;">
+      <p style="font-size:20px; font-weight:500; margin:0;">수면 모니터링</p>
+      <p style="font-size:14px; color:var(--text-secondary); margin:0;">모니터링 ID를 입력해주세요</p>
+      <input id="deviceIdInput" placeholder="기기 ID 입력 (앱에서 확인)"
+        style="padding:10px 14px; border-radius:10px; border:1px solid var(--border);
+               background:var(--surface); color:var(--text-primary); font-size:15px;
+               width:240px; outline:none; font-family:monospace;">
+      <button onclick="connectDevice()"
+        style="appearance:none; border:none; background:var(--purple); color:white;
+               border-radius:10px; padding:10px 24px; font-size:15px; cursor:pointer; font-family:inherit;">
+        접속
+      </button>
+      <p style="font-size:12px; color:var(--text-tertiary); margin:0;">앱 → 동기화 탭 → 모니터링 ID에서 확인</p>
+    </div>`;
+});
+
+function connectDevice() {
+  const id = document.getElementById('deviceIdInput').value.trim();
+  if (!id) { alert('ID를 입력해주세요.'); return; }
+  location.href = '?id=' + id;
+}
+
+document.addEventListener('click', (e) => {
+  const wrap = e.target.closest('.tooltip-wrap');
+  document.querySelectorAll('.tooltip-wrap.active').forEach(el => {
+    if (el !== wrap) el.classList.remove('active');
+  });
+  if (wrap) wrap.classList.toggle('active');
+});
+
+/* ====== 카드 커스터마이징 (드래그 앤 드롭) ====== */
+let isEditMode  = false;
+let dragSrcCard = null;
+
+const CARD_ORDER_KEY = 'sleep_card_order';
+
+// 저장된 순서 불러와서 적용
+function loadCardOrder() {
+  try {
+    const saved = localStorage.getItem(CARD_ORDER_KEY);
+    if (!saved) return;
+    const order = JSON.parse(saved);
+    const grid  = document.getElementById('miniGrid');
+    order.forEach(cardId => {
+      const card = grid.querySelector(`[data-card-id="${cardId}"]`);
+      if (card) grid.appendChild(card);
+    });
+  } catch (e) {}
+}
+
+// 현재 순서 저장
+function saveCardOrder() {
+  try {
+    const cards = document.querySelectorAll('#miniGrid .mini-card');
+    const order = Array.from(cards).map(c => c.dataset.cardId);
+    localStorage.setItem(CARD_ORDER_KEY, JSON.stringify(order));
+  } catch (e) {}
+}
+
+// 편집 모드 토글
+function toggleEditMode() {
+  isEditMode = !isEditMode;
+  const grid    = document.getElementById('miniGrid');
+  const btn     = document.getElementById('editBtn');
+  const hint    = document.getElementById('editHint');
+  grid.classList.toggle('edit-mode', isEditMode);
+
+  if (isEditMode) {
+    btn.textContent  = '완료';
+    btn.style.background = 'var(--accent)';
+    btn.style.color      = '#fff';
+    btn.style.border     = 'none';
+    hint.textContent = '카드를 길게 눌러 순서를 변경하세요';
+    initDrag();
+  } else {
+    btn.textContent  = '편집';
+    btn.style.background = 'var(--surface)';
+    btn.style.color      = 'var(--text-secondary)';
+    btn.style.border     = '1px solid var(--border)';
+    hint.textContent = '';
+    saveCardOrder();
+  }
+}
+
+// 카드 클릭 — 편집 모드에서는 시트 열기 막기
+function handleCardClick(e, sheetId, callback) {
+  if (isEditMode) { e.stopPropagation(); return; }
+  openSheet(sheetId);
+  if (callback) callback();
+}
+
+// 드래그 앤 드롭 초기화
+function initDrag() {
+  const cards = document.querySelectorAll('#miniGrid .mini-card');
+
+  cards.forEach(card => {
+    // 마우스 드래그
+    card.setAttribute('draggable', 'true');
+
+    card.addEventListener('dragstart', onDragStart);
+    card.addEventListener('dragend',   onDragEnd);
+    card.addEventListener('dragover',  onDragOver);
+    card.addEventListener('dragleave', onDragLeave);
+    card.addEventListener('drop',      onDrop);
+
+    // 터치 드래그 (모바일)
+    card.addEventListener('touchstart', onTouchStart, { passive: true });
+    card.addEventListener('touchmove',  onTouchMove,  { passive: false });
+    card.addEventListener('touchend',   onTouchEnd);
+  });
+}
+
+function onDragStart(e) {
+  dragSrcCard = this;
+  this.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+}
+function onDragEnd() {
+  this.classList.remove('dragging');
+  document.querySelectorAll('.mini-card').forEach(c => c.classList.remove('drag-over'));
+}
+function onDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  if (this !== dragSrcCard) this.classList.add('drag-over');
+}
+function onDragLeave() { this.classList.remove('drag-over'); }
+function onDrop(e) {
+  e.preventDefault();
+  this.classList.remove('drag-over');
+  if (dragSrcCard && dragSrcCard !== this) {
+    const grid  = document.getElementById('miniGrid');
+    const cards = Array.from(grid.querySelectorAll('.mini-card'));
+    const srcIdx  = cards.indexOf(dragSrcCard);
+    const destIdx = cards.indexOf(this);
+    if (srcIdx < destIdx) {
+      grid.insertBefore(dragSrcCard, this.nextSibling);
+    } else {
+      grid.insertBefore(dragSrcCard, this);
+    }
+  }
+}
+
+// ===== 터치 드래그 =====
+let touchCard    = null;
+let touchClone   = null;
+let touchOffsetX = 0;
+let touchOffsetY = 0;
+
+function onTouchStart(e) {
+  if (!isEditMode) return;
+  const touch = e.touches[0];
+  touchCard   = this;
+  const rect  = this.getBoundingClientRect();
+  touchOffsetX = touch.clientX - rect.left;
+  touchOffsetY = touch.clientY - rect.top;
+
+  // 고스트 클론 생성
+  touchClone = this.cloneNode(true);
+  touchClone.style.cssText = `
+    position: fixed;
+    width: ${rect.width}px;
+    height: ${rect.height}px;
+    left: ${rect.left}px;
+    top: ${rect.top}px;
+    opacity: 0.85;
+    pointer-events: none;
+    z-index: 999;
+    border-radius: 18px;
+    background: var(--card-bg);
+    box-shadow: 0 8px 30px rgba(0,0,0,0.2);
+    transition: none;
+  `;
+  document.body.appendChild(touchClone);
+  this.classList.add('dragging');
+}
+
+function onTouchMove(e) {
+  if (!touchCard || !touchClone) return;
+  e.preventDefault();
+  const touch = e.touches[0];
+  touchClone.style.left = (touch.clientX - touchOffsetX) + 'px';
+  touchClone.style.top  = (touch.clientY - touchOffsetY) + 'px';
+
+  // 아래 있는 카드 찾기
+  touchClone.style.display = 'none';
+  const target = document.elementFromPoint(touch.clientX, touch.clientY);
+  touchClone.style.display = '';
+
+  document.querySelectorAll('.mini-card').forEach(c => c.classList.remove('drag-over'));
+  const overCard = target?.closest('.mini-card');
+  if (overCard && overCard !== touchCard) overCard.classList.add('drag-over');
+}
+
+function onTouchEnd(e) {
+  if (!touchCard || !touchClone) return;
+  const touch = e.changedTouches[0];
+
+  touchClone.style.display = 'none';
+  const target = document.elementFromPoint(touch.clientX, touch.clientY);
+  touchClone.style.display = '';
+
+  const overCard = target?.closest('.mini-card');
+  if (overCard && overCard !== touchCard) {
+    const grid    = document.getElementById('miniGrid');
+    const cards   = Array.from(grid.querySelectorAll('.mini-card'));
+    const srcIdx  = cards.indexOf(touchCard);
+    const destIdx = cards.indexOf(overCard);
+    if (srcIdx < destIdx) grid.insertBefore(touchCard, overCard.nextSibling);
+    else                   grid.insertBefore(touchCard, overCard);
+  }
+
+  document.querySelectorAll('.mini-card').forEach(c => c.classList.remove('drag-over'));
+  touchCard.classList.remove('dragging');
+  document.body.removeChild(touchClone);
+  touchCard  = null;
+  touchClone = null;
+}
+
+// 페이지 로드 시 저장된 순서 적용
+document.addEventListener('DOMContentLoaded', loadCardOrder);
+
+/* ====== 바텀 시트 ====== */
+let currentSheet = null;
+
+function openSheet(id) {
+  if (currentSheet) closeSheet();
+  const overlay = document.getElementById('sheetOverlay');
+  const sheet   = document.getElementById(id);
+  if (!sheet) return;
+  currentSheet = sheet;
+  overlay.style.display = 'block';
+  requestAnimationFrame(() => {
+    overlay.classList.add('visible');
+    sheet.classList.add('visible');
+  });
+  document.body.style.overflow = 'hidden';
+}
+
+function closeSheet() {
+  if (!currentSheet) return;
+  const overlay = document.getElementById('sheetOverlay');
+  overlay.classList.remove('visible');
+  currentSheet.classList.remove('visible');
+  const s = currentSheet;
+  currentSheet = null;
+  setTimeout(() => { overlay.style.display = 'none'; }, 300);
+  document.body.style.overflow = '';
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeSheet();
+});
+
+/* ====== Firebase 데이터 수신 처리 ====== */
+window.addEventListener('sleepdata:update', (e) => {
+  sleepData = e.detail;
+  const deviceId = window._deviceId;
+  document.getElementById('dataBadge').textContent = deviceId ? `ID: ${deviceId}` : 'Firebase 실시간 연결됨';
+  const syncedAt = sleepData.syncedAt ? `마지막 동기화: ${sleepData.syncedAt}` : 'Firebase에서 최신 데이터를 실시간으로 표시 중입니다.';
+  document.getElementById('sourceNote').textContent = syncedAt;
+  renderOverview();
+  renderStages();
+});
+
+window.addEventListener('sleepdata:empty', () => {
+  document.getElementById('dataBadge').textContent = 'Firebase 연결됨 (데이터 없음)';
+  document.getElementById('sourceNote').textContent = 'sleep_latest에 아직 데이터가 없습니다. 워치를 차고 하룻밤 자면 자동으로 채워져요.';
+  renderOverview();
+  renderStages();
+});
+
+window.addEventListener('sleepall:update', (e) => {
+  allHistory = e.detail;
+  renderTrend();
+  // 미니 트렌드 바 업데이트
+  const { mondayKey, sundayKey } = getWeekRange(0);
+  const thisWeek = allHistory.filter(d => d.dateKey >= mondayKey && d.dateKey <= sundayKey);
+  const barsEl = document.getElementById('mini-trend-bars');
+  if (barsEl && thisWeek.length > 0) {
+    const maxScore = Math.max(...thisWeek.map(d => d.sleepScore || 0), 100);
+    barsEl.innerHTML = thisWeek.map(d => {
+      const score = d.sleepScore || 0;
+      const h = Math.round((score / maxScore) * 36);
+      return `<div style="width:100%; max-width:28px; height:${h}px; background:var(--accent); border-radius:3px; opacity:${score > 0 ? 0.7 + score/300 : 0.2}; flex:1;"></div>`;
+    }).join('');
+  }
+});
+
+window.addEventListener('sleepsummary:update', (e) => {
+  weeklyHistory = e.detail;
+  renderWeekly();
+  // 주간 요약 미니 카드 업데이트
+  const miniEl = document.getElementById('mini-weekly-val');
+  if (miniEl && weeklyHistory.length > 0) {
+    const scores = weeklyHistory.map(d => d.sleepScore).filter(v => v != null);
+    const avg = scores.length ? Math.round(scores.reduce((a,b)=>a+b,0)/scores.length) : null;
+    miniEl.textContent = avg ? `평균 ${avg}점` : `${weeklyHistory.length}일`;
+  }
+});
+
+window.addEventListener('sleepalerts:update', (e) => {
+  alerts = e.detail;
+  renderAlerts();
+});
+
+window.addEventListener('napsummary:update', (e) => {
+  napMap = e.detail;
+  renderTrend(); // 낮잠 데이터 갱신 시 추이 차트도 갱신
+});
+
+/* ====== 초기 렌더 (Firebase 응답 도착 전 기본 화면) ====== */
+renderOverview();
+renderStages();
+renderTrend();
+renderWeekly();
+renderAlerts();
+</script>
+</body>
+</html>
