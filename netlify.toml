@@ -1,0 +1,11 @@
+# netlify.toml
+# Netlify 빌드 및 Functions 설정
+
+[build]
+  # functions 디렉토리 위치
+  functions = "netlify/functions"
+
+# weekly-analysis 함수 단독 스케줄 설정
+[functions."weekly-analysis"]
+  schedule = "0 15 * * 0"
+  # 매주 일요일 UTC 15:00 = KST 00:00 (자정)
