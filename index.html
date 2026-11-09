@@ -1961,7 +1961,7 @@ let lidarChartInstance = null;
 
 function lidarOccupancy(dist) {
   if (dist <= 50)  return { text: '재실 🧑',   color: 'var(--amber)' };
-  if (dist > 150)  return { text: '공석 💤',   color: 'var(--green)' };
+  if (dist > 120)  return { text: '공석 💤',   color: 'var(--green)' };
   return               { text: '감지 중 🔍', color: 'var(--text-secondary)' };
 }
 
