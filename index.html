@@ -7,7 +7,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
-  import { getDatabase, ref, query, limitToLast, onValue, update } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js";
+  import { getDatabase, ref, query, limitToLast, orderByChild, onValue, update } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyB9NL0E9WohYB-Z-71IPk1ceXdQC3WI-Oc",
@@ -122,6 +122,16 @@
       window.dispatchEvent(new CustomEvent('napsummary:update', { detail: napMap }));
     });
   }
+
+  /* 8. FCM 경보 이력 (전역 — deviceId 무관) */
+  const alertHistoryQuery = query(ref(db, '/alert_history'), limitToLast(50));
+  onValue(alertHistoryQuery, (snapshot) => {
+    const val = snapshot.val() || {};
+    const list = Object.entries(val)
+      .map(([key, data]) => ({ key, ...data }))
+      .sort((a, b) => (a.sentAt > b.sentAt ? -1 : 1));
+    window.dispatchEvent(new CustomEvent('alerthistory:update', { detail: list }));
+  });
 </script>
 <style>
   :root {
@@ -855,6 +865,20 @@
       </div>
     </div>
 
+    <div class="mini-card full" data-card-id="fcm-history" onclick="handleCardClick(event,'sheet-fcm-history',function(){renderFcmHistory();})">
+      <div class="drag-handle">⠿</div>
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <div class="mini-card-icon" style="background:#fde8e8; margin-bottom:0; width:32px; height:32px; font-size:15px;">🚨</div>
+          <div>
+            <p style="font-size:14px; font-weight:600; color:var(--text-primary); margin:0;">경보 발송 이력</p>
+            <p class="mini-card-sub" style="margin:2px 0 0;" id="mini-fcmhistory-sub">불러오는 중...</p>
+          </div>
+        </div>
+        <span style="color:var(--text-tertiary); font-size:18px;">›</span>
+      </div>
+    </div>
+
   </div>
   </div>
 
@@ -1052,6 +1076,16 @@
   <div class="sheet-header"><span class="sheet-title">이상 감지 기록</span><button class="sheet-close" onclick="closeSheet()">✕</button></div>
   <div class="sheet-body" id="alertCard"></div>
 </div>
+<!-- 바텀 시트: 경보 발송 이력 -->
+<div class="sheet" id="sheet-fcm-history">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><span class="sheet-title">경보 발송 이력</span><button class="sheet-close" onclick="closeSheet()">✕</button></div>
+  <div class="sheet-body">
+    <p id="fcm-history-count" style="font-size:12px; color:var(--text-tertiary); margin-bottom:14px;"></p>
+    <div id="fcm-history-list"></div>
+  </div>
+</div>
+
 <!-- 이상 예외 처리 모달 -->
 <div id="overrideModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:200; align-items:center; justify-content:center;">
   <div style="background:var(--card-bg); border-radius:16px; padding:24px; max-width:360px; width:90%; margin:auto;">
@@ -2652,6 +2686,98 @@ window.addEventListener('sleepalerts:update', (e) => {
 window.addEventListener('napsummary:update', (e) => {
   napMap = e.detail;
   renderTrend(); // 낮잠 데이터 갱신 시 추이 차트도 갱신
+});
+
+/* ====== FCM 경보 이력 ====== */
+let fcmAlertHistory = [];
+
+function formatKST(isoStr) {
+  if (!isoStr) return '-';
+  try {
+    const d = new Date(isoStr);
+    return d.toLocaleString('ko-KR', {
+      timeZone: 'Asia/Seoul',
+      month: 'numeric', day: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+      hour12: false
+    });
+  } catch (e) { return isoStr; }
+}
+
+function alertTypeName(alertType) {
+  if (alertType === 'missing_anomaly') return '실종·이상 의심';
+  if (alertType === 'fall_suspected')  return '낙상 의심';
+  if (alertType === 'high_risk')       return '고위험 주의';
+  return alertType || '경보';
+}
+
+function renderFcmHistory() {
+  const listEl  = document.getElementById('fcm-history-list');
+  const countEl = document.getElementById('fcm-history-count');
+  if (!listEl) return;
+
+  if (fcmAlertHistory.length === 0) {
+    if (countEl) countEl.textContent = '발송된 경보가 없습니다.';
+    listEl.innerHTML = `<p style="font-size:13px; color:var(--text-secondary); padding:16px 0;">경보 발송 이력이 없습니다.</p>`;
+    return;
+  }
+
+  if (countEl) countEl.textContent = `총 ${fcmAlertHistory.length}건 (최근 50건)`;
+
+  listEl.innerHTML = fcmAlertHistory.map(item => {
+    const isUrgent  = item.priority === 'urgent';
+    const bg        = isUrgent ? 'var(--red-bg)'   : 'var(--amber-bg)';
+    const border    = isUrgent ? 'var(--red)'       : 'var(--amber)';
+    const dotColor  = isUrgent ? 'var(--red)'       : 'var(--amber)';
+    const typeName  = alertTypeName(item.alertType);
+    const timeStr   = formatKST(item.sentAt);
+
+    return `
+      <div style="
+        background:${bg};
+        border-left: 3px solid ${border};
+        border-radius: 12px;
+        padding: 14px 16px;
+        margin-bottom: 10px;
+      ">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="width:8px; height:8px; border-radius:50%; background:${dotColor}; display:inline-block; flex-shrink:0;"></span>
+            <span style="font-size:13px; font-weight:600; color:var(--text-primary);">${item.title || typeName}</span>
+          </div>
+          <span style="font-size:11px; color:var(--text-tertiary); white-space:nowrap; margin-left:8px;">${timeStr}</span>
+        </div>
+        <p style="font-size:12px; color:var(--text-secondary); margin:0 0 6px 16px; line-height:1.5;">${item.body || ''}</p>
+        <div style="display:flex; align-items:center; gap:8px; margin-left:16px;">
+          <span style="font-size:11px; font-weight:500; padding:2px 8px; border-radius:20px;
+            background:${isUrgent ? 'var(--red)' : 'var(--amber)'};
+            color:#fff;">${isUrgent ? '긴급' : '주의'}</span>
+          <span style="font-size:11px; color:var(--text-tertiary);">${typeName}</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+window.addEventListener('alerthistory:update', (e) => {
+  fcmAlertHistory = e.detail;
+
+  // 미니 카드 부제목 업데이트
+  const subEl = document.getElementById('mini-fcmhistory-sub');
+  if (subEl) {
+    if (fcmAlertHistory.length === 0) {
+      subEl.textContent = '발송 이력 없음';
+    } else {
+      const latest = fcmAlertHistory[0];
+      subEl.textContent = `최근: ${formatKST(latest.sentAt)} · 총 ${fcmAlertHistory.length}건`;
+    }
+  }
+
+  // 시트가 열려 있으면 즉시 렌더
+  const sheet = document.getElementById('sheet-fcm-history');
+  if (sheet && sheet.classList.contains('visible')) {
+    renderFcmHistory();
+  }
 });
 
 /* ====== 초기 렌더 (Firebase 응답 도착 전 기본 화면) ====== */
