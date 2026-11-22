@@ -2708,6 +2708,8 @@ function alertTypeName(alertType) {
   if (alertType === 'missing_anomaly') return '실종·이상 의심';
   if (alertType === 'fall_suspected')  return '낙상 의심';
   if (alertType === 'high_risk')       return '고위험 주의';
+  if (alertType === 'missing_suspected') return '이상 주의';
+  if (alertType === 'weekly_summary')  return '주간 수면 리포트';
   return alertType || '경보';
 }
 
