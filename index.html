@@ -2710,6 +2710,8 @@ function alertTypeName(alertType) {
   if (alertType === 'high_risk')       return '고위험 주의';
   if (alertType === 'missing_suspected') return '이상 주의';
   if (alertType === 'weekly_summary')  return '주간 수면 리포트';
+  if (alertType === 'no_morning_activity') return '아침 무반응';
+  if (alertType === 'dawn_light')      return '새벽 조명 지속';
   return alertType || '경보';
 }
 
